@@ -90,10 +90,22 @@ def communicate_with_process(process):
         return process.communicate()
     except BaseException:
         stop_process(process)
+
+        for stream in (
+            process.stdout,
+            process.stderr,
+        ):
+            if stream is not None:
+                stream.close()
+
         raise
 
 
-def run_command_capture(command):
+def run_command_capture(
+    command,
+    verbose=False,
+    progress_label=None,
+):
     """
     Run a command while displaying its output live and also
     retaining the output for later parsing.
@@ -102,9 +114,16 @@ def run_command_capture(command):
     stream for status/progress information.
     """
 
-    print()
-    print("+ " + quote_command(command))
-    print()
+    if verbose:
+        print()
+        print("+ " + quote_command(command))
+        print()
+    elif progress_label:
+        print(
+            f"{progress_label}:   0%",
+            end="",
+            flush=True,
+        )
 
     process = subprocess.Popen(
         command,
@@ -115,12 +134,34 @@ def run_command_capture(command):
     )
 
     lines = []
+    last_percent = 0
 
     assert process.stdout is not None
 
     try:
         for line in process.stdout:
-            print(line, end="")
+            if verbose:
+                print(line, end="")
+            elif progress_label:
+                percentages = re.findall(
+                    r"\[\s*(\d+)%\]",
+                    line,
+                )
+
+                if percentages:
+                    percent = int(
+                        percentages[-1]
+                    )
+
+                    if percent != last_percent:
+                        print(
+                            f"\r{progress_label}: "
+                            f"{percent:3d}%",
+                            end="",
+                            flush=True,
+                        )
+                        last_percent = percent
+
             lines.append(line)
 
         returncode = wait_for_process(
@@ -132,24 +173,63 @@ def run_command_capture(command):
     finally:
         process.stdout.close()
 
+        if not verbose and progress_label:
+            print()
+
     return (
         returncode,
         "".join(lines),
     )
 
 
-def run_command(command):
-    print()
-    print("+ " + quote_command(command))
-    print()
+def run_command(
+    command,
+    verbose=False,
+    status_label=None,
+):
+    if verbose:
+        print()
+        print("+ " + quote_command(command))
+        print()
+    elif status_label:
+        print(
+            f"{status_label}...",
+            end="",
+            flush=True,
+        )
 
     process = subprocess.Popen(
         command,
+        stdout=(
+            None
+            if verbose
+            else subprocess.PIPE
+        ),
+        stderr=(
+            None
+            if verbose
+            else subprocess.STDOUT
+        ),
+        text=not verbose,
     )
 
-    returncode = wait_for_process(
-        process
-    )
+    if verbose:
+        returncode = wait_for_process(
+            process
+        )
+        output = None
+    else:
+        output, _ = communicate_with_process(
+            process
+        )
+        returncode = process.returncode
+
+        if status_label:
+            print(
+                " done"
+                if returncode == 0
+                else " failed"
+            )
 
     if returncode != 0:
         raise subprocess.CalledProcessError(
@@ -160,6 +240,7 @@ def run_command(command):
     return subprocess.CompletedProcess(
         command,
         returncode,
+        output,
     )
 
 
@@ -229,7 +310,8 @@ def print_media_errors(errors):
 def data_errors_present(errors):
     """
     SCSI and C2 errors affect the audio/data samples we are
-    extracting and therefore must reach zero.
+    extracting, trigger refinement, and are subject to the
+    configured final error policy.
 
     Q errors are subchannel-Q errors. They are reported, but are
     not used as a failure criterion for this audio extraction.
@@ -238,6 +320,16 @@ def data_errors_present(errors):
     return (
         errors["SCSI"] != 0
         or errors["C2"] != 0
+    )
+
+
+def should_abort_on_errors(
+    errors,
+    abort_on_skip,
+):
+    return (
+        abort_on_skip
+        and data_errors_present(errors)
     )
 
 
@@ -289,7 +381,7 @@ def parse_cdparanoia_toc(text):
     return tracks
 
 
-def read_disc_toc(device):
+def read_disc_toc(device, verbose=False):
     command = [
         "cdparanoia",
         "-Q",
@@ -297,9 +389,10 @@ def read_disc_toc(device):
         device,
     ]
 
-    print(
-        "Reading audio track layout with cdparanoia..."
-    )
+    if verbose:
+        print(
+            "Reading audio track layout with cdparanoia..."
+        )
 
     process = subprocess.Popen(
         command,
@@ -827,6 +920,7 @@ def segments_to_wav(
     segments,
     wav_path,
     expected_sectors,
+    verbose=False,
 ):
     total_sectors = sum(
         segment["sectors"]
@@ -839,54 +933,55 @@ def segments_to_wav(
             "the requested sector count."
         )
 
-    print()
-    print("WAV conversion")
-    print("--------------")
+    if verbose:
+        print()
+        print("WAV conversion")
+        print("--------------")
 
-    for index, segment in enumerate(
-        segments,
-        start=1,
-    ):
-        end_sector = (
-            segment["start_sector"]
-            + segment["sectors"]
-        )
+        for index, segment in enumerate(
+            segments,
+            start=1,
+        ):
+            end_sector = (
+                segment["start_sector"]
+                + segment["sectors"]
+            )
 
-        print(f"Segment {index}:")
-        print(
-            f"  BIN:               "
-            f"{segment['path']}"
-        )
-        print(
-            f"  Redumper track:    "
-            f"{segment['track']:02d}"
-        )
-        print(
-            f"  Start sector:      "
-            f"{segment['start_sector']:,}"
-        )
-        print(
-            f"  End sector:        "
-            f"{end_sector:,} [exclusive]"
-        )
-        print(
-            f"  Sectors used:      "
-            f"{segment['sectors']:,}"
-        )
+            print(f"Segment {index}:")
+            print(
+                f"  BIN:               "
+                f"{segment['path']}"
+            )
+            print(
+                f"  Redumper track:    "
+                f"{segment['track']:02d}"
+            )
+            print(
+                f"  Start sector:      "
+                f"{segment['start_sector']:,}"
+            )
+            print(
+                f"  End sector:        "
+                f"{end_sector:,} [exclusive]"
+            )
+            print(
+                f"  Sectors used:      "
+                f"{segment['sectors']:,}"
+            )
 
-    print()
-    print(
-        f"Total sectors:       "
-        f"{total_sectors:,}"
-    )
-    print(
-        f"Duration:            "
-        f"{sectors_to_msf(total_sectors)}"
-    )
-    print(
-        f"Output WAV:          "
-        f"{wav_path}"
-    )
+        print()
+        print(
+            f"Total sectors:       "
+            f"{total_sectors:,}"
+        )
+        print(
+            f"Duration:            "
+            f"{sectors_to_msf(total_sectors)}"
+        )
+        print(
+            f"Output WAV:          "
+            f"{wav_path}"
+        )
 
     wav_path.parent.mkdir(
         parents=True,
@@ -987,6 +1082,10 @@ def main():
         "--retries",
         type=int,
         default=100,
+        help=(
+            "Sector retries per redumper pass "
+            "(default: 100)"
+        ),
     )
 
     parser.add_argument(
@@ -1001,11 +1100,45 @@ def main():
     )
 
     parser.add_argument(
+        "-X",
+        "--abort-on-skip",
+        action="store_true",
+        help=(
+            "Do not create a WAV if SCSI or C2 "
+            "errors remain after refinement "
+            "(default: write the WAV with a warning)"
+        ),
+    )
+
+    parser.add_argument(
         "--show-layout",
         action="store_true",
         help=(
             "Print the audio-track layout and exit "
             "without dumping"
+        ),
+    )
+
+    output_mode = parser.add_mutually_exclusive_group()
+
+    output_mode.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help=(
+            "Show commands, full tool output, ranges, "
+            "and conversion details "
+            "(default output mode: concise)"
+        ),
+    )
+
+    output_mode.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help=(
+            "Suppress routine output "
+            "(default output mode: concise)"
         ),
     )
 
@@ -1047,16 +1180,18 @@ def main():
     if args.show_layout:
         try:
             tracks = read_disc_toc(
-                args.device
+                args.device,
+                verbose=args.verbose,
             )
         except RuntimeError as exc:
             sys.exit(
                 f"ERROR: {exc}"
             )
 
-        print_disc_layout(
-            tracks
-        )
+        if not args.quiet:
+            print_disc_layout(
+                tracks
+            )
         return
 
     if shutil.which(
@@ -1075,21 +1210,28 @@ def main():
     ) as temporary_path:
         workdir = Path(temporary_path)
 
-        print(
-            f"Temporary workspace: {workdir}"
-        )
+        if args.verbose:
+            print(
+                f"Temporary workspace: {workdir}"
+            )
 
         extract_track(
             args,
             workdir,
         )
 
-    print(
-        f"Temporary workspace removed: {workdir}"
-    )
+    if args.verbose:
+        print(
+            f"Temporary workspace removed: {workdir}"
+        )
 
 
 def extract_track(args, workdir):
+
+    concise = (
+        not args.verbose
+        and not args.quiet
+    )
 
     # --------------------------------------------------------------
     # Track layout
@@ -1097,7 +1239,8 @@ def extract_track(args, workdir):
 
     try:
         tracks = read_disc_toc(
-            args.device
+            args.device,
+            verbose=args.verbose,
         )
 
         track = find_track(
@@ -1110,9 +1253,10 @@ def extract_track(args, workdir):
             f"ERROR: {exc}"
         )
 
-    print_selected_track(
-        track
-    )
+    if args.verbose:
+        print_selected_track(
+            track
+        )
 
     logical_start_lba = (
         track["begin"]
@@ -1150,6 +1294,16 @@ def extract_track(args, workdir):
         ).resolve()
     )
 
+    if concise:
+        print(
+            f"Ripping track {args.track:02d} from "
+            f"sector {logical_start_lba} to "
+            f"{logical_end_lba - 1}"
+        )
+        print(
+            f"Output: {wav_path}"
+        )
+
     before = snapshot_files(
         workdir
     )
@@ -1184,7 +1338,7 @@ def extract_track(args, workdir):
     ]
 
     # Partial dumps are expected to be incomplete, so force-split
-    # is required after WE have verified SCSI/C2 == 0.
+    # is required after the configured error policy is applied.
     split_command = [
         "redumper",
         "split",
@@ -1197,13 +1351,20 @@ def extract_track(args, workdir):
     # Initial dump
     # --------------------------------------------------------------
 
-    print()
-    print("Initial partial dump")
-    print("====================")
+    if args.verbose:
+        print()
+        print("Initial partial dump")
+        print("====================")
 
     returncode, output = (
         run_command_capture(
-            dump_command
+            dump_command,
+            verbose=args.verbose,
+            progress_label=(
+                "Reading"
+                if concise
+                else None
+            ),
         )
     )
 
@@ -1225,9 +1386,10 @@ def extract_track(args, workdir):
             "integrity cannot be verified."
         )
 
-    print_media_errors(
-        errors
-    )
+    if args.verbose:
+        print_media_errors(
+            errors
+        )
 
     # --------------------------------------------------------------
     # Refine ONLY if SCSI/C2 errors remain.
@@ -1243,39 +1405,41 @@ def extract_track(args, workdir):
             refine_passes_used
             >= args.refine_passes
         ):
-            sys.exit(
-                "ERROR: SCSI/C2 errors remain after "
-                f"{refine_passes_used} refine pass"
-                f"{'' if refine_passes_used == 1 else 'es'}.\n"
-                f"Remaining SCSI errors: "
-                f"{errors['SCSI']}\n"
-                f"Remaining C2 errors:   "
-                f"{errors['C2']}\n"
-                "No WAV was created."
-            )
+            break
 
         refine_passes_used += 1
 
-        print()
-        print(
-            f"Refine pass "
-            f"{refine_passes_used}/"
-            f"{args.refine_passes}"
-        )
-        print(
-            "================"
-        )
+        if args.verbose:
+            print()
+            print(
+                f"Refine pass "
+                f"{refine_passes_used}/"
+                f"{args.refine_passes}"
+            )
+            print(
+                "================"
+            )
 
-        print(
-            f"Refining only LBA "
-            f"{dump_start_lba}.."
-            f"{dump_end_lba} "
-            f"[end exclusive]"
-        )
+            print(
+                f"Refining only LBA "
+                f"{dump_start_lba}.."
+                f"{dump_end_lba} "
+                f"[end exclusive]"
+            )
 
         returncode, output = (
             run_command_capture(
-                refine_command
+                refine_command,
+                verbose=args.verbose,
+                progress_label=(
+                    (
+                        f"Refining "
+                        f"{refine_passes_used}/"
+                        f"{args.refine_passes}"
+                    )
+                    if concise
+                    else None
+                ),
             )
         )
 
@@ -1296,45 +1460,86 @@ def extract_track(args, workdir):
                 "No WAV was created."
             )
 
-        print_media_errors(
-            errors
+        if args.verbose:
+            print_media_errors(
+                errors
+            )
+
+    unresolved_errors = data_errors_present(
+        errors
+    )
+
+    if should_abort_on_errors(
+        errors,
+        args.abort_on_skip,
+    ):
+        sys.exit(
+            "ERROR: SCSI/C2 errors remain after "
+            f"{refine_passes_used} refine pass"
+            f"{'' if refine_passes_used == 1 else 'es'}.\n"
+            f"Remaining SCSI errors: "
+            f"{errors['SCSI']}\n"
+            f"Remaining C2 errors:   "
+            f"{errors['C2']}\n"
+            "No WAV was created because "
+            "--abort-on-skip was specified."
+        )
+
+    if unresolved_errors and concise:
+        print(
+            "Warning: writing WAV with unresolved "
+            f"SCSI={errors['SCSI']}, C2={errors['C2']}"
         )
 
     # --------------------------------------------------------------
-    # Our actual integrity gate.
+    # Final error status.
     # --------------------------------------------------------------
 
-    print()
-    print("Audio data integrity")
-    print("====================")
+    if args.verbose:
+        print()
+        print("Audio data integrity")
+        print("====================")
 
-    print()
-    print("SCSI: 0")
-    print("C2:   0")
-    print(
-        f"Q:    {errors['Q']} "
-        "(reported, not used as audio-data failure criterion)"
-    )
+        print()
+        print(f"SCSI: {errors['SCSI']}")
+        print(f"C2:   {errors['C2']}")
+        print(
+            f"Q:    {errors['Q']} "
+            "(reported, not used as audio-data failure criterion)"
+        )
 
-    print()
-    print(
-        f"PASS after {refine_passes_used} "
-        f"refine pass"
-        f"{'' if refine_passes_used == 1 else 'es'}."
-    )
+        print()
+        if unresolved_errors:
+            print(
+                "WARNING: unresolved SCSI/C2 errors "
+                "will be included in the forced split."
+            )
+        else:
+            print(
+                f"PASS after {refine_passes_used} "
+                f"refine pass"
+                f"{'' if refine_passes_used == 1 else 'es'}."
+            )
 
     # --------------------------------------------------------------
     # Force split because the disc was intentionally only
     # partially read.
     # --------------------------------------------------------------
 
-    print()
-    print("Splitting partial dump")
-    print("======================")
+    if args.verbose:
+        print()
+        print("Splitting partial dump")
+        print("======================")
 
     try:
         run_command(
-            split_command
+            split_command,
+            verbose=args.verbose,
+            status_label=(
+                "Splitting"
+                if concise
+                else None
+            ),
         )
 
     except subprocess.CalledProcessError as exc:
@@ -1378,13 +1583,27 @@ def extract_track(args, workdir):
     # --------------------------------------------------------------
 
     try:
+        if concise:
+            print(
+                "Writing WAV...",
+                end="",
+                flush=True,
+            )
+
         segments_to_wav(
             segments,
             wav_path,
             expected_sectors,
+            verbose=args.verbose,
         )
 
+        if concise:
+            print(" done")
+
     except BaseException as exc:
+
+        if concise:
+            print(" failed")
 
         if wav_path.exists():
             try:
@@ -1406,72 +1625,85 @@ def extract_track(args, workdir):
     # Complete
     # --------------------------------------------------------------
 
-    print()
-    print("Complete")
-    print("========")
+    if args.verbose:
+        print()
+        print("Complete")
+        print("========")
 
-    print(
-        f"Track:              "
-        f"{args.track:02d}"
-    )
+        print(
+            f"Track:              "
+            f"{args.track:02d}"
+        )
 
-    print(
-        f"Logical LBA range:  "
-        f"{logical_start_lba}.."
-        f"{logical_end_lba}"
-    )
+        print(
+            f"Logical LBA range:  "
+            f"{logical_start_lba}.."
+            f"{logical_end_lba}"
+        )
 
-    print(
-        f"Physical read range:"
-        f" {dump_start_lba}.."
-        f"{dump_end_lba}"
-    )
+        print(
+            f"Physical read range:"
+            f" {dump_start_lba}.."
+            f"{dump_end_lba}"
+        )
 
-    print(
-        f"Output sectors:     "
-        f"{expected_sectors:,}"
-    )
+        print(
+            f"Output sectors:     "
+            f"{expected_sectors:,}"
+        )
 
-    print(
-        f"Refine passes used: "
-        f"{refine_passes_used}"
-    )
+        print(
+            f"Refine passes used: "
+            f"{refine_passes_used}"
+        )
 
-    print(
-        f"Final SCSI errors:  "
-        f"{errors['SCSI']}"
-    )
+        print(
+            f"Final SCSI errors:  "
+            f"{errors['SCSI']}"
+        )
 
-    print(
-        f"Final C2 errors:    "
-        f"{errors['C2']}"
-    )
+        print(
+            f"Final C2 errors:    "
+            f"{errors['C2']}"
+        )
 
-    print(
-        f"Final Q errors:     "
-        f"{errors['Q']}"
-    )
+        print(
+            f"Final Q errors:     "
+            f"{errors['Q']}"
+        )
 
-    print(
-        f"Own pregap skipped: "
-        f"{pregap_skipped:,} sectors"
-    )
+        print(
+            f"Own pregap skipped: "
+            f"{pregap_skipped:,} sectors"
+        )
 
-    print(
-        f"Temporary CUE:      "
-        f"{cue_path}"
-    )
+        print(
+            f"Temporary CUE:      "
+            f"{cue_path}"
+        )
 
-    print(
-        f"WAV:                "
-        f"{wav_path}"
-    )
+        print(
+            f"WAV:                "
+            f"{wav_path}"
+        )
 
-    print()
-    print(
-        "Integrity:          PASS "
-        "(SCSI=0, C2=0)"
-    )
+        print()
+        if unresolved_errors:
+            print(
+                "Integrity:          WARNING "
+                f"(SCSI={errors['SCSI']}, "
+                f"C2={errors['C2']})"
+            )
+        else:
+            print(
+                "Integrity:          PASS "
+                "(SCSI=0, C2=0)"
+            )
+    elif concise:
+        print(
+            f"Done. SCSI={errors['SCSI']}, "
+            f"C2={errors['C2']}, Q={errors['Q']}"
+        )
 
 
 def handle_termination_signal(signum, _frame):

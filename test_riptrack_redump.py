@@ -1,10 +1,12 @@
 import importlib.machinery
 import importlib.util
+import io
 import os
 import signal
 import sys
 import threading
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -188,6 +190,119 @@ class TemporaryWorkspaceTests(unittest.TestCase):
         )
         extract_track.assert_not_called()
         temporary_directory.assert_not_called()
+
+    def test_concise_command_output_shows_only_progress(self):
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            returncode, captured = (
+                self.module.run_command_capture(
+                    [
+                        sys.executable,
+                        "-c",
+                        (
+                            "print('redumper detail'); "
+                            "print('[ 42%] LBA: 42/100'); "
+                            "print('[100%] LBA: 100/100')"
+                        ),
+                    ],
+                    progress_label="Reading",
+                )
+            )
+
+        self.assertEqual(returncode, 0)
+        self.assertIn(
+            "redumper detail",
+            captured,
+        )
+        self.assertNotIn(
+            "redumper detail",
+            output.getvalue(),
+        )
+        self.assertIn(
+            "Reading: 100%",
+            output.getvalue().replace("\r", ""),
+        )
+
+    def test_verbose_command_output_is_unfiltered(self):
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            returncode, _captured = (
+                self.module.run_command_capture(
+                    [
+                        sys.executable,
+                        "-c",
+                        "print('redumper detail')",
+                    ],
+                    verbose=True,
+                    progress_label="Reading",
+                )
+            )
+
+        self.assertEqual(returncode, 0)
+        self.assertIn(
+            "redumper detail",
+            output.getvalue(),
+        )
+
+    def test_quiet_command_output_is_empty(self):
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            returncode, captured = (
+                self.module.run_command_capture(
+                    [
+                        sys.executable,
+                        "-c",
+                        (
+                            "print('redumper detail'); "
+                            "print('[100%] LBA: 100/100')"
+                        ),
+                    ]
+                )
+            )
+
+        self.assertEqual(returncode, 0)
+        self.assertIn(
+            "redumper detail",
+            captured,
+        )
+        self.assertEqual(
+            output.getvalue(),
+            "",
+        )
+
+    def test_abort_on_skip_policy(self):
+        clean = {
+            "SCSI": 0,
+            "C2": 0,
+            "Q": 4,
+        }
+        unresolved = {
+            "SCSI": 1,
+            "C2": 2,
+            "Q": 4,
+        }
+
+        self.assertFalse(
+            self.module.should_abort_on_errors(
+                clean,
+                True,
+            )
+        )
+        self.assertFalse(
+            self.module.should_abort_on_errors(
+                unresolved,
+                False,
+            )
+        )
+        self.assertTrue(
+            self.module.should_abort_on_errors(
+                unresolved,
+                True,
+            )
+        )
 
     def test_sigterm_stops_child_and_removes_workspace(self):
         workspaces = []

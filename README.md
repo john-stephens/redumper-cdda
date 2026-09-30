@@ -23,6 +23,23 @@ Typical optional controls:
 ./riptrack-redump /dev/sg4 2 --retries=100 --refine-passes=3
 ```
 
+Normal output is concise, with a track summary and single-line progress
+for dumping and refinement. Use `-v` or `--verbose` to show executed
+commands, complete redumper output, exact ranges, split segments, and
+the full integrity summary:
+
+``` bash
+./riptrack-redump /dev/sg4 2 --verbose
+```
+
+Use `-q` or `--quiet` to suppress routine output. Errors are still
+written to standard error and the exit status still indicates success
+or failure:
+
+``` bash
+./riptrack-redump /dev/sg4 2 --quiet
+```
+
 Each run creates a unique temporary workspace for redumper's dump,
 state, BIN, and CUE files. The workspace is removed after success,
 failure, or interruption. The completed WAV is written outside that
@@ -63,12 +80,12 @@ dump_end   = logical_end + 1
 The extra sector exists only to give redumper enough source material for
 endpoint/read-offset processing. It is not included in the final WAV.
 
-After the dump passes the SCSI/C2 integrity check, the intentionally
-partial image is split with `redumper split --force-split`. The
-generated CUE is used to locate the selected track's file-relative INDEX
-01. The script starts there, then consumes subsequent AUDIO BINs from
-sector zero until exactly `cdparanoia`'s reported track length has been
-collected.
+After the SCSI/C2 state is determined and the configured error policy is
+applied, the intentionally partial image is split with
+`redumper split --force-split`. The generated CUE is used to locate the
+selected track's file-relative INDEX 01. The script starts there, then
+consumes subsequent AUDIO BINs from sector zero until exactly
+`cdparanoia`'s reported track length has been collected.
 
 ## PCM handling
 
@@ -85,7 +102,7 @@ belongs in production output.
 A failed normal `redumper split` is not a valid error detector because
 this project deliberately reads only part of the disc.
 
-The acceptance condition for audio data is:
+The preferred result is:
 
 ``` text
 SCSI == 0
@@ -93,7 +110,17 @@ C2   == 0
 ```
 
 Q/subchannel errors are currently reported but do not fail audio
-extraction.
+extraction. By default, the script also writes the WAV if SCSI or C2
+errors remain after all configured refinement passes. It reports the
+remaining counts so the result is not mistaken for an error-free rip.
+
+Use `-X` or `--abort-on-skip` to require SCSI and C2 to both reach zero.
+With that option, unresolved SCSI/C2 errors cause a nonzero exit and no
+WAV is created:
+
+``` bash
+./riptrack-redump /dev/sg4 2 --abort-on-skip
+```
 
 The desired control flow is:
 
@@ -112,8 +139,10 @@ inspect SCSI/C2 status
                        repeat as needed
                               |
                  still nonzero at limit
-                              |
-                             FAIL
+                         /           \
+                  default             -X
+                     |                 |
+              write with warning     FAIL
 ```
 
 Run `refine` only when SCSI or C2 errors remain. Restrict it to exactly
@@ -192,13 +221,16 @@ alignment. Do not encode 48 as a universal production offset.
 -   redumper reads one extra physical ending sector.
 -   No endian swap.
 -   No manual +48-frame shift.
--   SCSI and C2 must be zero.
+-   SCSI/C2 counts must always be determined and reported.
+-   By default, unresolved SCSI/C2 errors produce a warned WAV.
+-   With `--abort-on-skip`, unresolved SCSI/C2 errors produce no WAV.
 -   Q is currently informational.
 -   Refine only when SCSI/C2 remain.
 -   Refine only the same partial physical LBA range.
 -   Partial-disc split completeness must not be confused with C2/SCSI
     integrity.
--   Failed integrity/conversion must not leave a misleading WAV.
+-   Failed status detection or conversion must not leave a misleading
+    WAV.
 
 ## Philosophy
 

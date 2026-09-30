@@ -114,9 +114,9 @@ Match:                     100.000000000%
 
 Preserve this behavior.
 
-## SCSI/C2 integrity
+## SCSI/C2 policy
 
-The audio acceptance condition is:
+The preferred error-free result is:
 
 ``` text
 SCSI == 0
@@ -126,6 +126,13 @@ C2   == 0
 Q/subchannel errors are currently informational and must not
 independently fail audio extraction unless requirements explicitly
 change.
+
+The default behavior is to create the WAV even if SCSI or C2 errors
+remain after the configured refinement passes. Print the final counts
+and clearly identify the result as having unresolved errors.
+
+When `-X` or `--abort-on-skip` is supplied, SCSI and C2 must both be
+zero. If either remains nonzero, exit nonzero and create no final WAV.
 
 ### Never use normal split failure as the C2 detector
 
@@ -187,15 +194,16 @@ redumper refine   --drive=DEVICE   --image-path=PATH   --image-name=NAME   --ret
 Never run an unconstrained refine because it may attempt to process the
 full disc.
 
-Stop immediately when SCSI and C2 are both zero. If the configured
-maximum passes are exhausted with errors remaining, exit nonzero and
-create no final WAV.
+Stop refinement immediately when SCSI and C2 are both zero. If the
+configured maximum passes are exhausted with errors remaining, apply
+the selected policy: write a warned WAV by default, or exit nonzero and
+create no WAV when `--abort-on-skip` is active.
 
 ## Partial splitting
 
-Once SCSI/C2 integrity has independently passed,
-`redumper split --force-split` may be used because the image is
-intentionally incomplete.
+Once SCSI/C2 status has been independently determined and the selected
+error policy allows extraction, `redumper split --force-split` may be
+used because the image is intentionally incomplete.
 
 `--force-split` is a representation/extraction step, not an integrity
 check.
@@ -208,7 +216,8 @@ Fail closed and do not leave a misleading WAV when:
 -   requested track does not exist;
 -   redumper dump fails;
 -   SCSI/C2 state cannot be determined;
--   SCSI/C2 remain after allowed refinement;
+-   SCSI/C2 remain after allowed refinement and `--abort-on-skip` is
+    active;
 -   force-split fails;
 -   CUE cannot be found or parsed;
 -   selected audio track lacks INDEX 01;
@@ -299,6 +308,7 @@ Before completing a change, verify:
 -   [ ] SCSI/C2 integrity is independent of partial split completeness;
 -   [ ] refine runs only when SCSI/C2 require it;
 -   [ ] refine is restricted to the partial physical range;
+-   [ ] unresolved SCSI/C2 follows the selected default or abort policy;
 -   [ ] output PCM payload is exactly `length * 2352` bytes;
 -   [ ] failure paths remove incomplete WAV output.
 
