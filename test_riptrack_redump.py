@@ -3,12 +3,14 @@ import importlib.util
 import io
 import os
 import signal
+import shutil
+import subprocess
 import sys
 import tempfile
 import threading
 import unittest
 from argparse import Namespace
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -320,6 +322,23 @@ class TemporaryWorkspaceTests(unittest.TestCase):
         self.assertIn(
             "Reading track 03:  75%",
             rendered,
+        )
+
+    def test_progress_labels_selected_data_track(self):
+        label = self.module.format_progress_label(
+            "Reading",
+            1,
+            [
+                {
+                    "number": 1,
+                    "kind": "data",
+                }
+            ],
+        )
+
+        self.assertEqual(
+            label,
+            "Reading data track 01",
         )
 
     def test_verbose_command_output_is_unfiltered(self):
@@ -742,6 +761,281 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                     299,
                 )
 
+    def make_mode1_raw_sector(self, payload=None):
+        if payload is None:
+            payload = bytes(
+                self.module.ISO_SECTOR_SIZE
+            )
+
+        sector = bytearray(
+            self.module.SECTOR_SIZE
+        )
+        sector[:12] = (
+            b"\x00"
+            + b"\xff" * 10
+            + b"\x00"
+        )
+        sector[15] = 1
+        sector[16:16 + self.module.ISO_SECTOR_SIZE] = payload
+        return bytes(sector)
+
+    def make_iso9660_payloads(self, volume_sectors=20):
+        payloads = [
+            bytearray(self.module.ISO_SECTOR_SIZE)
+            for _ in range(volume_sectors)
+        ]
+        primary = payloads[16]
+        primary[0] = 1
+        primary[1:6] = b"CD001"
+        primary[6] = 1
+        primary[80:84] = volume_sectors.to_bytes(
+            4,
+            byteorder="little",
+        )
+        primary[84:88] = volume_sectors.to_bytes(
+            4,
+            byteorder="big",
+        )
+        primary[128:130] = (
+            self.module.ISO_SECTOR_SIZE.to_bytes(
+                2,
+                byteorder="little",
+            )
+        )
+        primary[130:132] = (
+            self.module.ISO_SECTOR_SIZE.to_bytes(
+                2,
+                byteorder="big",
+            )
+        )
+        root = primary[156:190]
+        root[0] = 34
+        root_extent = volume_sectors - 1
+        root[2:6] = root_extent.to_bytes(
+            4,
+            byteorder="little",
+        )
+        root[6:10] = root_extent.to_bytes(
+            4,
+            byteorder="big",
+        )
+        root[10:14] = self.module.ISO_SECTOR_SIZE.to_bytes(
+            4,
+            byteorder="little",
+        )
+        root[14:18] = self.module.ISO_SECTOR_SIZE.to_bytes(
+            4,
+            byteorder="big",
+        )
+        root[25] = 0x02
+        root[28:30] = (1).to_bytes(
+            2,
+            byteorder="little",
+        )
+        root[30:32] = (1).to_bytes(
+            2,
+            byteorder="big",
+        )
+        root[32] = 1
+        root[33] = 0
+        primary[156:190] = root
+        return [bytes(payload) for payload in payloads]
+
+    def test_identify_generated_data_track_uses_index01(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workdir = Path(directory)
+            cue_path = workdir / "track01.cue"
+            bin_path = workdir / "track01.bin"
+            cue_path.write_text(
+                'FILE "track01.bin" BINARY\n'
+                '  TRACK 01 MODE1/2352\n'
+                '    INDEX 00 00:00:00\n'
+                '    INDEX 01 00:00:01\n',
+                encoding="utf-8",
+            )
+            bin_path.write_bytes(
+                bytes(3 * self.module.SECTOR_SIZE)
+            )
+
+            data_track = (
+                self.module.identify_generated_data_track(
+                    workdir,
+                    "track01",
+                    [cue_path, bin_path],
+                    1,
+                )
+            )
+
+            self.assertEqual(
+                data_track["track_type"],
+                "MODE1/2352",
+            )
+            self.assertEqual(
+                data_track["start_sector"],
+                1,
+            )
+            self.assertEqual(
+                data_track["sectors"],
+                2,
+            )
+
+    def test_mode1_data_track_converts_to_trimmed_iso(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workdir = Path(directory)
+            bin_path = workdir / "track01.bin"
+            iso_path = workdir / "track01.iso"
+            fixture_path = workdir / "fixture.iso"
+            generator = shutil.which("genisoimage")
+
+            if generator:
+                source_directory = workdir / "source"
+                source_directory.mkdir()
+                (source_directory / "README.TXT").write_text(
+                    "riptrack-redump ISO test\n",
+                    encoding="ascii",
+                )
+                result = subprocess.run(
+                    [
+                        generator,
+                        "-quiet",
+                        "-no-pad",
+                        "-o",
+                        str(fixture_path),
+                        str(source_directory),
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(
+                    result.returncode,
+                    0,
+                    msg=result.stderr,
+                )
+                fixture_bytes = fixture_path.read_bytes()
+                self.assertEqual(
+                    len(fixture_bytes)
+                    % self.module.ISO_SECTOR_SIZE,
+                    0,
+                )
+                payloads = [
+                    fixture_bytes[offset:offset + self.module.ISO_SECTOR_SIZE]
+                    for offset in range(
+                        0,
+                        len(fixture_bytes),
+                        self.module.ISO_SECTOR_SIZE,
+                    )
+                ]
+            else:
+                payloads = self.make_iso9660_payloads(20)
+                fixture_bytes = b"".join(payloads)
+
+            bin_path.write_bytes(
+                b"".join(
+                    self.make_mode1_raw_sector(payload)
+                    for payload in payloads
+                )
+                + self.make_mode1_raw_sector()
+            )
+            data_track = {
+                "path": bin_path,
+                "track": 1,
+                "track_type": "MODE1/2352",
+                "sector_size": self.module.SECTOR_SIZE,
+                "start_sector": 0,
+                "sectors": len(payloads) + 1,
+            }
+
+            self.module.data_track_to_iso(
+                data_track,
+                iso_path,
+            )
+
+            self.assertEqual(
+                iso_path.stat().st_size,
+                len(fixture_bytes),
+            )
+            self.assertEqual(
+                iso_path.read_bytes(),
+                fixture_bytes,
+            )
+            with iso_path.open("rb") as iso_file:
+                iso_file.seek(
+                    16 * self.module.ISO_SECTOR_SIZE
+                )
+                self.assertEqual(
+                    iso_file.read(6),
+                    b"\x01CD001",
+                )
+
+            if generator and shutil.which("isoinfo"):
+                result = subprocess.run(
+                    [
+                        "isoinfo",
+                        "-d",
+                        "-i",
+                        str(iso_path),
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(
+                    result.returncode,
+                    0,
+                    msg=result.stderr,
+                )
+
+    def test_mode2_form1_payload_is_supported(self):
+        sector = bytearray(
+            self.module.SECTOR_SIZE
+        )
+        sector[:12] = (
+            b"\x00"
+            + b"\xff" * 10
+            + b"\x00"
+        )
+        sector[15] = 2
+        sector[16:20] = b"\x01\x02\x08\x00"
+        sector[20:24] = sector[16:20]
+        sector[24:24 + self.module.ISO_SECTOR_SIZE] = (
+            b"A" * self.module.ISO_SECTOR_SIZE
+        )
+
+        payload = self.module.extract_iso_payload(
+            bytes(sector),
+            "MODE2/2352",
+        )
+
+        self.assertEqual(
+            payload,
+            b"A" * self.module.ISO_SECTOR_SIZE,
+        )
+
+    def test_mode2_form2_payload_is_rejected(self):
+        sector = bytearray(
+            self.module.SECTOR_SIZE
+        )
+        sector[:12] = (
+            b"\x00"
+            + b"\xff" * 10
+            + b"\x00"
+        )
+        sector[15] = 2
+        sector[16:20] = b"\x01\x02\x28\x00"
+        sector[20:24] = sector[16:20]
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "Form 2",
+        ):
+            self.module.extract_iso_payload(
+                bytes(sector),
+                "MODE2/2352",
+            )
+
     def make_range_tracks(self):
         return [
             {
@@ -831,6 +1125,66 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             [{"start": None, "end": 3}],
         )
 
+    def test_argparse_accepts_include_data_batch_range(self):
+        arguments = [
+            str(SCRIPT_PATH),
+            "/dev/sg-test",
+            "1-3",
+            "--include-data",
+            "--batch",
+        ]
+        parsed = []
+
+        def extract_track(args, _workdir):
+            parsed.append(
+                (
+                    args.include_data,
+                    args.batch,
+                )
+            )
+
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                arguments,
+            ),
+            mock.patch.object(
+                self.module.shutil,
+                "which",
+                return_value="/mock/tool",
+            ),
+            mock.patch.object(
+                self.module,
+                "extract_track",
+                side_effect=extract_track,
+            ),
+        ):
+            self.module.main()
+
+        self.assertEqual(parsed, [(True, True)])
+
+    def test_argparse_rejects_include_data_range_without_batch(self):
+        arguments = [
+            str(SCRIPT_PATH),
+            "/dev/sg-test",
+            "1-3",
+            "--include-data",
+        ]
+
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                arguments,
+            ),
+            redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit) as caught,
+        ):
+            self.module.main()
+
+        self.assertEqual(caught.exception.code, 2)
+
     def test_combined_range_uses_one_track_wav(self):
         tracks = self.module.resolve_track_selection(
             self.make_range_tracks(),
@@ -846,7 +1200,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
 
             self.assertEqual(len(jobs), 1)
             self.assertEqual(
-                jobs[0]["wav_path"].name,
+                jobs[0]["output_path"].name,
                 "track.wav",
             )
             self.assertEqual(
@@ -868,7 +1222,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             )
 
             self.assertEqual(
-                [job["wav_path"].name for job in jobs],
+                [job["output_path"].name for job in jobs],
                 [
                     "track01.wav",
                     "track02.wav",
@@ -879,6 +1233,128 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                 [job["expected_sectors"] for job in jobs],
                 [100, 100, 100],
             )
+
+    def test_include_data_range_selects_audio_and_data(self):
+        tracks = self.make_range_tracks()[:3]
+        tracks[0]["kind"] = "data"
+        tracks[1]["kind"] = "audio"
+        tracks[2]["kind"] = "data"
+
+        selected = self.module.resolve_disc_selection(
+            tracks,
+            self.module.parse_track_selection("-3"),
+            include_data=True,
+        )
+
+        self.assertEqual(
+            [track["number"] for track in selected],
+            [1, 2, 3],
+        )
+
+    def test_mixed_batch_uses_wav_and_iso_names(self):
+        tracks = self.make_range_tracks()[:3]
+        tracks[0]["kind"] = "data"
+        tracks[1]["kind"] = "audio"
+        tracks[2]["kind"] = "data"
+
+        with tempfile.TemporaryDirectory() as directory:
+            jobs = self.module.build_output_jobs(
+                tracks,
+                True,
+                output_directory=directory,
+            )
+
+            self.assertEqual(
+                [job["output_path"].name for job in jobs],
+                [
+                    "track01.iso",
+                    "track02.wav",
+                    "track03.iso",
+                ],
+            )
+            self.assertEqual(
+                [job["kind"] for job in jobs],
+                ["data", "audio", "data"],
+            )
+
+    def test_single_data_track_uses_iso_name(self):
+        track = self.make_range_tracks()[0]
+        track["kind"] = "data"
+
+        with tempfile.TemporaryDirectory() as directory:
+            jobs = self.module.build_output_jobs(
+                [track],
+                False,
+                output_directory=directory,
+            )
+
+            self.assertEqual(
+                jobs[0]["output_path"].name,
+                "track01.iso",
+            )
+            self.assertEqual(jobs[0]["kind"], "data")
+
+    def test_include_data_without_batch_requires_data_track(self):
+        track = self.make_range_tracks()[0]
+        track["kind"] = "audio"
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "one explicit data track",
+        ):
+            self.module.validate_data_output_mode(
+                [track],
+                include_data=True,
+                batch=False,
+            )
+
+    def test_output_failure_removes_entire_batch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_directory = Path(directory)
+            jobs = []
+
+            for number in (1, 2):
+                output_path = (
+                    output_directory
+                    / f"track{number:02d}.iso"
+                )
+                jobs.append(
+                    {
+                        "kind": "data",
+                        "data_track": {"track": number},
+                        "output_path": output_path,
+                        "temporary_path": output_path.with_name(
+                            f".{output_path.name}.part"
+                        ),
+                    }
+                )
+
+            def convert(data_track, path, **_kwargs):
+                path.write_bytes(b"partial")
+
+                if data_track["track"] == 2:
+                    raise RuntimeError("conversion failed")
+
+            with mock.patch.object(
+                self.module,
+                "data_track_to_iso",
+                side_effect=convert,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "conversion failed",
+                ):
+                    self.module.create_output_files(
+                        jobs
+                    )
+
+            for job in jobs:
+                self.assertFalse(
+                    job["temporary_path"].exists()
+                )
+                self.assertFalse(
+                    job["output_path"].exists()
+                )
 
     def test_combined_range_assembles_across_track_bins(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -932,9 +1408,10 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             output_jobs = [
                 {
                     "track": track,
+                    "kind": "audio",
                     "component_tracks": [track],
                     "expected_sectors": track["length"],
-                    "wav_path": (
+                    "output_path": (
                         workdir
                         / f"track{track['number']:02d}.wav"
                     ),
@@ -945,6 +1422,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                 abort_on_skip=False,
                 batch=True,
                 device="/dev/sg-test",
+                include_data=False,
                 output=None,
                 quiet=True,
                 refine_passes=3,
@@ -989,6 +1467,9 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                 mock.patch.object(
                     self.module,
                     "segments_to_wav",
+                    side_effect=lambda _segments, path, _sectors, **_kwargs: (
+                        path.write_bytes(b"wav")
+                    ),
                 ) as write_wav,
             ):
                 self.module.extract_track(
@@ -1000,6 +1481,117 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             self.assertEqual(run_split.call_count, 1)
             self.assertEqual(identify.call_count, 2)
             self.assertEqual(write_wav.call_count, 2)
+
+    def test_mixed_batch_uses_one_dump_and_transactional_outputs(self):
+        tracks = self.make_range_tracks()[:2]
+        tracks[0]["kind"] = "data"
+        tracks[1]["kind"] = "audio"
+
+        with tempfile.TemporaryDirectory() as directory:
+            workdir = Path(directory)
+            output_jobs = self.module.build_output_jobs(
+                tracks,
+                True,
+                output_directory=workdir,
+            )
+            args = Namespace(
+                abort_on_skip=False,
+                batch=True,
+                device="/dev/sg-test",
+                include_data=True,
+                output=None,
+                quiet=True,
+                refine_passes=3,
+                retries=100,
+                track=self.module.parse_track_selection(
+                    "1-2"
+                ),
+                verbose=False,
+            )
+            clean_output = (
+                "media errors:\n"
+                "  SCSI: 0\n"
+                "  C2: 0\n"
+                "  Q: 0\n"
+            )
+            data_track = {
+                "cue_path": workdir / "disc.cue",
+                "path": workdir / "track01.bin",
+                "track": 1,
+                "track_type": "MODE1/2352",
+                "sector_size": self.module.SECTOR_SIZE,
+                "start_sector": 0,
+                "sectors": 20,
+            }
+
+            with (
+                mock.patch.object(
+                    self.module,
+                    "read_disc_layout",
+                    return_value=tracks,
+                ),
+                mock.patch.object(
+                    self.module,
+                    "build_output_jobs",
+                    return_value=output_jobs,
+                ),
+                mock.patch.object(
+                    self.module,
+                    "run_command_capture",
+                    return_value=(0, clean_output),
+                ) as run_capture,
+                mock.patch.object(
+                    self.module,
+                    "run_command",
+                ) as run_split,
+                mock.patch.object(
+                    self.module,
+                    "identify_generated_data_track",
+                    return_value=data_track,
+                ) as identify_data,
+                mock.patch.object(
+                    self.module,
+                    "identify_generated_audio_segments",
+                    return_value=([], workdir / "disc.cue", 0),
+                ) as identify_audio,
+                mock.patch.object(
+                    self.module,
+                    "data_track_to_iso",
+                    side_effect=lambda _track, path, **_kwargs: (
+                        path.write_bytes(b"iso")
+                    ),
+                ) as write_iso,
+                mock.patch.object(
+                    self.module,
+                    "segments_to_wav",
+                    side_effect=lambda _segments, path, _sectors, **_kwargs: (
+                        path.write_bytes(b"wav")
+                    ),
+                ) as write_wav,
+            ):
+                self.module.extract_track(
+                    args,
+                    workdir,
+                )
+
+            self.assertEqual(run_capture.call_count, 1)
+            self.assertEqual(run_split.call_count, 1)
+            self.assertIn(
+                "--filesystem-trim",
+                run_split.call_args.args[0],
+            )
+            identify_data.assert_called_once()
+            identify_audio.assert_called_once()
+            write_iso.assert_called_once()
+            write_wav.assert_called_once()
+            self.assertEqual(
+                (workdir / "track01.iso").read_bytes(),
+                b"iso",
+            )
+            self.assertEqual(
+                (workdir / "track02.wav").read_bytes(),
+                b"wav",
+            )
 
     def test_open_range_omits_data_tracks(self):
         tracks = self.make_range_tracks()[1:3]

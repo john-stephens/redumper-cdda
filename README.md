@@ -1,6 +1,6 @@
 # riptrack-redump
 
-`riptrack-redump` extracts one or more contiguous audio-CD tracks on Linux.
+`riptrack-redump` extracts one or more contiguous CD tracks on Linux.
 It reads the complete audio/data layout with MMC `READ TOC`, validates every
 audio boundary against **cdparanoia**, and uses **redumper** for the actual
 preservation-oriented extraction.
@@ -46,6 +46,20 @@ Track 1 is data, `-3` extracts audio Tracks 2 and 3, while `1-3` fails.
 The physical range is still read once; data-track payload is excluded
 when the AUDIO segments are assembled into WAV output.
 
+Use `-d` or `--include-data` to include data tracks. Mixed or multi-track
+selections containing data require `-B`/`--batch`; one explicitly named data
+track may be extracted without batch mode:
+
+``` bash
+./riptrack-redump /dev/sg4 1 --include-data
+./riptrack-redump /dev/sg4 1-3 --include-data --batch
+./riptrack-redump /dev/sg4 -3 -d -B
+```
+
+With `--include-data`, ranges include both audio and data tracks. Audio files
+are named `trackNN.wav` and data files are named `trackNN.iso`. Without this
+option, the established audio-only range rules remain unchanged.
+
 By default, a multi-track range is written as one `track.wav`. Use
 `-B` or `--batch` to package the same single dump as separate
 `trackNN.wav` files at the logical track boundaries:
@@ -54,8 +68,9 @@ By default, a multi-track range is written as one `track.wav`. Use
 ./riptrack-redump /dev/sg4 1-3 --batch
 ```
 
-`--output=PATH` sets the combined output filename and cannot be used
-with `--batch`.
+`--output=PATH` sets the non-batch output filename and cannot be used with
+`--batch`. It applies to a combined audio WAV, a single audio track, or a
+single explicitly selected data-track ISO.
 
 Normal output is concise, with a track summary and single-line progress
 showing the current track and percentage during dumping and refinement.
@@ -75,14 +90,18 @@ or failure:
 ./riptrack-redump /dev/sg4 2 --quiet
 ```
 
-Each run creates a unique temporary workspace for redumper's dump,
-state, BIN, and CUE files. The workspace is removed after success,
-failure, or interruption. The completed WAV is written outside that
-workspace and is retained.
+Each run creates a unique temporary workspace for redumper's dump, state,
+BIN, and CUE files. The workspace is removed after success, failure, or
+interruption. Completed WAV and ISO files are written outside that workspace.
+They are first written to temporary sibling files and committed only after
+the entire output set succeeds.
 
 For a single track, the default output is `trackNN.wav`; for a
 multi-track range, it is `track.wav`. Use `--output=PATH` to choose a
-different combined WAV filename and location.
+different non-batch filename and location.
+
+For one data track selected with `--include-data`, the default output is
+`trackNN.iso`.
 
 To inspect the complete audio/data track layout without dumping anything,
 omit the track number and use:
@@ -126,7 +145,8 @@ dump_end   = logical_end + 1
 ```
 
 The extra sector exists only to give redumper enough source material for
-endpoint/read-offset processing. It is not included in the final WAV.
+endpoint/read-offset processing. It is not included in final WAV or ISO
+output.
 
 After the SCSI/C2 state is determined and the configured error policy is
 applied, the intentionally partial image is split with
@@ -134,6 +154,18 @@ applied, the intentionally partial image is split with
 selected track's file-relative INDEX 01. The script starts there, then
 consumes subsequent AUDIO BINs from sector zero until exactly
 `cdparanoia`'s reported track length has been collected.
+
+When data output is requested, splitting also uses `--filesystem-trim`. The
+selected data BIN begins at its CUE `INDEX 01`, excluding its INDEX 00 pregap.
+Raw `MODE1/2352` sectors are reduced to their 2048-byte user payload;
+`MODE2/2352` is accepted only for Form 1 sectors, and `MODE1/2048` is copied
+directly. MODE0, Mode 2 Form 2, malformed sectors, and unknown modes fail
+closed.
+
+The converted file must contain a valid ISO9660 primary volume descriptor,
+matching little- and big-endian volume sizes, and a 2048-byte logical block
+size. It is trimmed to the filesystem's declared volume size. Consequently,
+`trackNN.iso` is a mountable filesystem image rather than a renamed raw BIN.
 
 ### Track 0 / hidden audio
 
@@ -177,14 +209,14 @@ SCSI == 0
 C2   == 0
 ```
 
-Q/subchannel errors are currently reported but do not fail audio
-extraction. By default, the script also writes the WAV if SCSI or C2
-errors remain after all configured refinement passes. It reports the
+Q/subchannel errors are currently reported but do not fail extraction. By
+default, the script also writes output if SCSI or C2 errors remain after all
+configured refinement passes. It reports the
 remaining counts so the result is not mistaken for an error-free rip.
 
 Use `-X` or `--abort-on-skip` to require SCSI and C2 to both reach zero.
 With that option, unresolved SCSI/C2 errors cause a nonzero exit and no
-WAV is created:
+output is created:
 
 ``` bash
 ./riptrack-redump /dev/sg4 2 --abort-on-skip
@@ -222,7 +254,7 @@ redumper refine   --drive=/dev/sg4   --image-path=...   --image-name=track02   -
 ```
 
 If the script cannot reliably determine the SCSI/C2 state, it should
-fail closed rather than create an apparently verified WAV. A
+fail closed rather than create apparently verified output. A
 structured/state-based redumper error query is preferable to fragile
 console parsing if one can be validated.
 
@@ -286,7 +318,7 @@ alignment. Do not encode 48 as a universal production offset.
 -   A range starts at its first selected track boundary and ends at its
     last selected track's exclusive logical endpoint.
 -   A range uses one physical dump and one force-split operation.
--   Batch mode changes WAV packaging only; it does not perform separate
+-   Batch mode changes WAV/ISO packaging only; it does not perform separate
     per-track dumps.
 -   For Tracks 1+, output starts at the selected Track INDEX 01.
 -   For Tracks 1+, the selected Track INDEX 00 pregap is excluded.
@@ -296,19 +328,21 @@ alignment. Do not encode 48 as a universal production offset.
 -   No endian swap.
 -   No manual +48-frame shift.
 -   SCSI/C2 counts must always be determined and reported.
--   By default, unresolved SCSI/C2 errors produce a warned WAV.
--   With `--abort-on-skip`, unresolved SCSI/C2 errors produce no WAV.
+-   Data ISO output begins at INDEX 01 and contains 2048-byte sectors.
+-   Data ISO output is validated and trimmed to its ISO9660 volume size.
+-   By default, unresolved SCSI/C2 errors produce warned output.
+-   With `--abort-on-skip`, unresolved SCSI/C2 errors produce no output.
 -   Q is currently informational.
 -   Refine only when SCSI/C2 remain.
 -   Refine only the same partial physical LBA range.
 -   Partial-disc split completeness must not be confused with C2/SCSI
     integrity.
--   Failed status detection or conversion must not leave a misleading
-    WAV.
+-   Failed status detection or conversion must not leave misleading WAV or
+    ISO output.
 
 ## Philosophy
 
-The WAV is a derived convenience artifact. redumper's recovered
-data/state is the preservation-oriented source. Avoid modifying
-recovered samples unless necessary to select the desired logical range
-and package it into WAV.
+WAV and ISO files are derived convenience artifacts. redumper's recovered
+data/state is the preservation-oriented source. Avoid modifying recovered
+samples or sectors except as necessary to select the desired logical range
+and package it into the requested container.

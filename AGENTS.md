@@ -3,7 +3,7 @@
 ## Mission
 
 Maintain `riptrack-redump`, a Linux utility that extracts one or more
-contiguous audio-CD tracks with redumper. It reads the complete track layout
+contiguous CD tracks with redumper. It reads the complete track layout
 with MMC `READ TOC` and retains cdparanoia as the validated authority for
 audio-track boundaries during the MMC migration.
 
@@ -80,13 +80,20 @@ non-audio tracks automatically, but their explicitly supplied endpoint
 must itself be audio. Thus, with data Track 1, `-3` selects audio Tracks
 2 and 3 while `1-3` fails.
 
+When `-d` or `--include-data` is active, resolve the selection against the
+full MMC layout and include both audio and data tracks. Mixed or multi-track
+data selection requires `-B`/`--batch`. Without batch mode,
+`--include-data` is valid only for one explicit data-track number. Track 0
+remains audio-only and is valid only when Track 1 is audio.
+
 For a resolved contiguous selection:
 
 ``` text
 logical_start = first selected track begin
 logical_end   = last selected track end
 physical_sectors = logical_end - logical_start
-output_sectors = sum(selected audio track lengths)
+audio_output_sectors = sum(selected audio track lengths)
+data_output_sectors = ISO9660 declared volume size for each data track
 ```
 
 Perform exactly one initial redumper dump for the entire range and use
@@ -100,7 +107,38 @@ logical track boundaries and write `trackNN.wav` files. Batch mode is a
 packaging step and must not trigger additional dump, refine, or split
 commands.
 
-### Pregap semantics
+With `--include-data --batch`, write audio tracks as `trackNN.wav` and data
+tracks as `trackNN.iso`. A single explicit data track may produce
+`trackNN.iso` without batch mode. `--output` may override one non-batch output
+but remains incompatible with batch mode.
+
+### Data-track ISO semantics
+
+Data output begins at the selected CUE track's file-relative INDEX 01,
+excluding its INDEX 00 pregap. Require a dedicated split BIN for the selected
+data track; fail rather than guessing boundaries in a shared BIN.
+
+When any selected output is data, pass `--filesystem-trim` to the one
+`redumper split --force-split` command. Convert supported split modes as
+follows:
+
+``` text
+MODE1/2352        bytes 16..2064 -> 2048-byte ISO sector
+MODE2/2352 Form 1 bytes 24..2072 -> 2048-byte ISO sector
+MODE1/2048        copy directly
+```
+
+Validate raw sync, mode bytes, duplicated Mode 2 subheaders, and the Form 1
+bit. Fail closed for MODE0, Mode 2 Form 2, mixed forms, malformed sectors, or
+unknown modes.
+
+Require a valid ISO9660 primary volume descriptor. Its little- and big-endian
+volume-space sizes must agree, its logical block size must be 2048, and its
+declared volume must fit in the converted track. Truncate the ISO to that
+declared volume size. Never create an `.iso` by renaming or directly copying a
+2352-byte raw BIN.
+
+### Audio pregap semantics
 
 For Track N where N is 1 or greater, output means:
 
@@ -135,7 +173,7 @@ dump_end   = logical_end + 1
 
 The end is exclusive.
 
-Never include that extra sector in the WAV. It exists to provide source
+Never include that extra sector in a WAV or ISO. It exists to provide source
 samples for redumper's endpoint/read-offset handling.
 
 This was empirically required: without it, the final sector contained
@@ -199,16 +237,15 @@ SCSI == 0
 C2   == 0
 ```
 
-Q/subchannel errors are currently informational and must not
-independently fail audio extraction unless requirements explicitly
-change.
+Q/subchannel errors are currently informational and must not independently
+fail extraction unless requirements explicitly change.
 
-The default behavior is to create the WAV even if SCSI or C2 errors
-remain after the configured refinement passes. Print the final counts
-and clearly identify the result as having unresolved errors.
+The default behavior is to create output even if SCSI or C2 errors remain
+after the configured refinement passes. Print the final counts and clearly
+identify the result as having unresolved errors.
 
 When `-X` or `--abort-on-skip` is supplied, SCSI and C2 must both be
-zero. If either remains nonzero, exit nonzero and create no final WAV.
+zero. If either remains nonzero, exit nonzero and create no final output.
 
 ### Never use normal split failure as the C2 detector
 
@@ -270,10 +307,10 @@ redumper refine   --drive=DEVICE   --image-path=PATH   --image-name=NAME   --ret
 Never run an unconstrained refine because it may attempt to process the
 full disc.
 
-Stop refinement immediately when SCSI and C2 are both zero. If the
-configured maximum passes are exhausted with errors remaining, apply
-the selected policy: write a warned WAV by default, or exit nonzero and
-create no WAV when `--abort-on-skip` is active.
+Stop refinement immediately when SCSI and C2 are both zero. If the configured
+maximum passes are exhausted with errors remaining, apply the selected policy:
+write warned output by default, or exit nonzero and create no output when
+`--abort-on-skip` is active.
 
 ## Partial splitting
 
@@ -286,7 +323,7 @@ check.
 
 ## Failure policy
 
-Fail closed and do not leave a misleading WAV when:
+Fail closed and do not leave misleading WAV or ISO output when:
 
 -   TOC parsing fails;
 -   requested track does not exist;
@@ -297,21 +334,23 @@ Fail closed and do not leave a misleading WAV when:
 -   force-split fails;
 -   CUE cannot be found or parsed;
 -   selected audio track lacks INDEX 01;
+-   selected data track lacks INDEX 01 or has a shared/unsupported BIN;
 -   required BINs are missing/malformed;
 -   split data cannot provide exactly the requested logical length;
--   WAV conversion short-reads or otherwise fails.
+-   WAV conversion short-reads or otherwise fails;
+-   data-sector conversion or ISO9660 validation fails.
 
-If WAV creation has begun when a failure occurs, remove the incomplete
-WAV.
+If output creation has begun when a failure occurs, remove every incomplete
+WAV, ISO, and temporary sibling file.
 
-For batch output, a failure or interruption during any WAV must remove
-every WAV created for that batch so a partial set is never presented as
-complete.
+For batch output, commit final names only after every conversion succeeds. A
+failure or interruption must remove the entire new output set so a partial
+batch is never presented as complete.
 
 Create redumper's intermediate files in a unique temporary workspace.
 Remove that workspace after success, failure, SIGINT, SIGHUP, or SIGTERM.
-Stop an active child process before removing its workspace. Keep only a
-successfully completed final WAV.
+Stop an active child process before removing its workspace. Keep only
+successfully completed final outputs.
 
 ## Tests Codex should add/maintain
 
@@ -342,6 +381,15 @@ Prefer unit tests for pure parsing/range functions. Cover:
 -   open-start ranges exclude Track 0;
 -   open ranges omit data tracks;
 -   bounded ranges reject explicitly selected data tracks;
+-   `--include-data` ranges select audio and data tracks;
+-   non-batch `--include-data` accepts only one explicit data track;
+-   mixed batch naming uses `trackNN.wav` and `trackNN.iso`;
+-   data CUE parsing starts at INDEX 01;
+-   MODE1/2352 and MODE2/2352 Form 1 payload extraction;
+-   Mode 2 Form 2 and unsupported modes fail closed;
+-   ISO9660 primary-volume validation and exact filesystem trimming;
+-   mixed batches still use one dump, refine range, and split;
+-   mixed-batch failure removes the entire output set;
 -   combined ranges produce one `track.wav`;
 -   batch ranges produce correctly bounded `trackNN.wav` files;
 -   insufficient split data;
@@ -393,12 +441,12 @@ Before completing a change, verify:
 -   [ ] Tracks 1+ begin at the selected Track N INDEX 01;
 -   [ ] Track 0 begins at LBA 0 and ends at Track 1 INDEX 01;
 -   [ ] a range is acquired with one dump over its full physical range;
--   [ ] batch mode only changes WAV packaging;
+-   [ ] batch mode only changes WAV/ISO packaging;
 -   [ ] Track N's own pregap is excluded;
 -   [ ] Track N+1's pregap is included;
 -   [ ] final sector count equals cdparanoia length;
 -   [ ] physical read includes one extra ending sector;
--   [ ] endpoint padding is not added to WAV;
+-   [ ] endpoint padding is not added to WAV or ISO;
 -   [ ] no endian swap exists;
 -   [ ] no manual sample/frame shift exists;
 -   [ ] SCSI/C2 integrity is independent of partial split completeness;
@@ -406,7 +454,9 @@ Before completing a change, verify:
 -   [ ] refine is restricted to the partial physical range;
 -   [ ] unresolved SCSI/C2 follows the selected default or abort policy;
 -   [ ] output PCM payload is exactly `length * 2352` bytes;
--   [ ] failure paths remove incomplete WAV output.
+-   [ ] data output begins at INDEX 01 and contains 2048-byte sectors;
+-   [ ] ISO output is validated and trimmed to its ISO9660 volume size;
+-   [ ] failure paths remove incomplete WAV and ISO output.
 
 If a proposed change violates an invariant, explain the reason and
 provide empirical evidence before implementing it.
