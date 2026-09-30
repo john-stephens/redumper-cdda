@@ -10,6 +10,18 @@ Read `README.md` before changing extraction behavior. The rules below
 encode behavior already established through hardware testing and must be
 treated as regression constraints.
 
+## Reference documentation
+
+The `ref/` directory contains captured command-line help for the external
+tools used by this project:
+
+-   `ref/cdparanoia_help.txt`
+-   `ref/redumper_help.txt`
+
+Consult these files when changing command construction, option handling,
+or output parsing. Treat them as local reference snapshots; they provide
+context but do not override the extraction invariants in this file.
+
 ## Non-negotiable extraction invariants
 
 ### Logical range
