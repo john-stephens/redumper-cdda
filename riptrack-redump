@@ -101,10 +101,29 @@ def communicate_with_process(process):
         raise
 
 
+def track_number_for_lba(tracks, lba):
+    for track in tracks:
+        if (
+            track["begin"]
+            <= lba
+            < track["end"]
+        ):
+            return track["number"]
+
+    if tracks and lba >= tracks[-1]["end"]:
+        return tracks[-1]["number"]
+
+    if tracks:
+        return tracks[0]["number"]
+
+    return None
+
+
 def run_command_capture(
     command,
     verbose=False,
     progress_label=None,
+    progress_tracks=None,
 ):
     """
     Run a command while displaying its output live and also
@@ -119,8 +138,18 @@ def run_command_capture(
         print("+ " + quote_command(command))
         print()
     elif progress_label:
+        current_track = (
+            progress_tracks[0]["number"]
+            if progress_tracks
+            else None
+        )
+        display_label = (
+            f"{progress_label} track {current_track:02d}"
+            if current_track is not None
+            else progress_label
+        )
         print(
-            f"{progress_label}:   0%",
+            f"{display_label}:   0%",
             end="",
             flush=True,
         )
@@ -134,7 +163,14 @@ def run_command_capture(
     )
 
     lines = []
-    last_percent = 0
+    last_progress = (
+        0,
+        (
+            progress_tracks[0]["number"]
+            if progress_tracks
+            else None
+        ),
+    )
 
     assert process.stdout is not None
 
@@ -153,14 +189,38 @@ def run_command_capture(
                         percentages[-1]
                     )
 
-                    if percent != last_percent:
+                    lba_match = re.search(
+                        r"\bLBA\s*:\s*(-?\d+)",
+                        line,
+                        re.IGNORECASE,
+                    )
+                    current_track = last_progress[1]
+
+                    if lba_match and progress_tracks:
+                        current_track = track_number_for_lba(
+                            progress_tracks,
+                            int(lba_match.group(1)),
+                        )
+
+                    progress = (
+                        percent,
+                        current_track,
+                    )
+
+                    if progress != last_progress:
+                        display_label = (
+                            f"{progress_label} track "
+                            f"{current_track:02d}"
+                            if current_track is not None
+                            else progress_label
+                        )
                         print(
-                            f"\r{progress_label}: "
+                            f"\r{display_label}: "
                             f"{percent:3d}%",
                             end="",
                             flush=True,
                         )
-                        last_percent = percent
+                        last_progress = progress
 
             lines.append(line)
 
@@ -486,6 +546,143 @@ def find_requested_track(tracks, number):
     }
 
 
+def parse_track_selection(value):
+    if re.fullmatch(r"\d+", value):
+        number = int(value)
+        return {
+            "start": number,
+            "end": number,
+        }
+
+    match = re.fullmatch(
+        r"(\d*)-(\d*)",
+        value,
+    )
+
+    if not match or not any(match.groups()):
+        raise argparse.ArgumentTypeError(
+            "track must be N, N-M, -M, or N-"
+        )
+
+    return {
+        "start": (
+            int(match.group(1))
+            if match.group(1)
+            else None
+        ),
+        "end": (
+            int(match.group(2))
+            if match.group(2)
+            else None
+        ),
+    }
+
+
+def resolve_track_selection(
+    tracks,
+    selection,
+):
+    regular_numbers = [
+        track["number"]
+        for track in tracks
+    ]
+
+    if not regular_numbers:
+        raise RuntimeError(
+            "No audio tracks are available."
+        )
+
+    start = selection["start"]
+    end = selection["end"]
+
+    if start is None:
+        start = 1
+
+    if end is None:
+        end = max(regular_numbers)
+
+    if start > end:
+        raise RuntimeError(
+            f"Invalid track range {start}-{end}."
+        )
+
+    selected = []
+
+    for number in range(start, end + 1):
+        selected.append(
+            find_requested_track(
+                tracks,
+                number,
+            )
+        )
+
+    return selected
+
+
+def format_track_numbers(selected_tracks):
+    first = selected_tracks[0]["number"]
+    last = selected_tracks[-1]["number"]
+
+    if first == last:
+        return f"{first:02d}"
+
+    return f"{first:02d}-{last:02d}"
+
+
+def build_output_jobs(
+    selected_tracks,
+    batch,
+    output=None,
+    output_directory=None,
+):
+    directory = (
+        Path.cwd()
+        if output_directory is None
+        else Path(output_directory)
+    )
+
+    if batch:
+        return [
+            {
+                "track": track,
+                "requested_track": track["number"],
+                "expected_sectors": track["length"],
+                "wav_path": (
+                    directory
+                    / f"track{track['number']:02d}.wav"
+                ).resolve(),
+            }
+            for track in selected_tracks
+        ]
+
+    first_track = selected_tracks[0]
+    logical_sectors = (
+        selected_tracks[-1]["end"]
+        - first_track["begin"]
+    )
+    wav_path = (
+        Path(output).expanduser().resolve()
+        if output is not None
+        else (
+            directory
+            / (
+                f"track{first_track['number']:02d}.wav"
+                if len(selected_tracks) == 1
+                else "track.wav"
+            )
+        ).resolve()
+    )
+
+    return [
+        {
+            "track": None,
+            "requested_track": first_track["number"],
+            "expected_sectors": logical_sectors,
+            "wav_path": wav_path,
+        }
+    ]
+
+
 def print_disc_layout(tracks):
     print()
     print("Audio track layout")
@@ -789,6 +986,7 @@ def identify_generated_audio_segments(
     changed,
     requested_track,
     expected_sectors,
+    track_zero_sectors=None,
 ):
     generated_cues = find_generated_cues(
         workdir,
@@ -863,12 +1061,21 @@ def identify_generated_audio_segments(
         if (
             requested_track == 0
             and selected_start_sector
-            != expected_sectors
+            != (
+                track_zero_sectors
+                if track_zero_sectors is not None
+                else expected_sectors
+            )
         ):
+            expected_index01 = (
+                track_zero_sectors
+                if track_zero_sectors is not None
+                else expected_sectors
+            )
             errors.append(
                 f"{cue_path}: Track 1 INDEX 01 is at "
                 f"sector {selected_start_sector:,}, expected "
-                f"{expected_sectors:,} from cdparanoia"
+                f"{expected_index01:,} from cdparanoia"
             )
             continue
 
@@ -1110,7 +1317,7 @@ def segments_to_wav(
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Extract one audio CD track using cdparanoia "
+            "Extract one or more audio CD tracks using cdparanoia "
             "for track boundaries and redumper for the "
             "actual offset-corrected extraction."
         )
@@ -1122,16 +1329,18 @@ def main():
 
     parser.add_argument(
         "track",
-        type=int,
+        type=parse_track_selection,
         nargs="?",
+        metavar="TRACK",
+        help="Track number or range: N, N-M, -M, or N-",
     )
 
     parser.add_argument(
         "--output",
         type=Path,
         help=(
-            "Final WAV path "
-            "(default: ./trackNN.wav)"
+            "Combined WAV path (default: ./trackNN.wav for one "
+            "track or ./track.wav for a multi-track range)"
         ),
     )
 
@@ -1164,6 +1373,16 @@ def main():
             "Do not create a WAV if SCSI or C2 "
             "errors remain after refinement "
             "(default: write the WAV with a warning)"
+        ),
+    )
+
+    parser.add_argument(
+        "-B",
+        "--batch",
+        action="store_true",
+        help=(
+            "Write one trackNN.wav per selected track "
+            "(default: one combined WAV)"
         ),
     )
 
@@ -1209,14 +1428,6 @@ def main():
             "track is required unless --show-layout is used"
         )
 
-    if (
-        args.track is not None
-        and args.track < 0
-    ):
-        sys.exit(
-            "ERROR: invalid track number"
-        )
-
     if args.retries < 0:
         sys.exit(
             "ERROR: invalid retry count"
@@ -1251,6 +1462,12 @@ def main():
             )
         return
 
+    if args.batch and args.output:
+        parser.error(
+            "--output cannot be used with --batch; batch files "
+            "are named trackNN.wav in the current directory"
+        )
+
     if shutil.which(
         "redumper"
     ) is None:
@@ -1258,9 +1475,7 @@ def main():
             "ERROR: redumper not found"
         )
 
-    prefix = (
-        f"riptrack-redump-{args.track:02d}-"
-    )
+    prefix = "riptrack-redump-"
 
     with tempfile.TemporaryDirectory(
         prefix=prefix,
@@ -1300,7 +1515,7 @@ def extract_track(args, workdir):
             verbose=args.verbose,
         )
 
-        track = find_requested_track(
+        selected_tracks = resolve_track_selection(
             tracks,
             args.track,
         )
@@ -1311,20 +1526,28 @@ def extract_track(args, workdir):
         )
 
     if args.verbose:
-        print_selected_track(
-            track
-        )
+        for track in selected_tracks:
+            print_selected_track(
+                track
+            )
+
+    first_track = selected_tracks[0]
+    last_track = selected_tracks[-1]
+    track_label = format_track_numbers(
+        selected_tracks
+    )
 
     logical_start_lba = (
-        track["begin"]
+        first_track["begin"]
     )
 
     logical_end_lba = (
-        track["end"]
+        last_track["end"]
     )
 
     expected_sectors = (
-        track["length"]
+        logical_end_lba
+        - logical_start_lba
     )
 
     dump_start_lba = (
@@ -1340,33 +1563,50 @@ def extract_track(args, workdir):
     # Paths
     # --------------------------------------------------------------
 
-    image_name = f"track{args.track:02d}"
-
-    wav_path = (
-        args.output.expanduser().resolve()
-        if args.output
+    image_name = (
+        f"track{first_track['number']:02d}"
+        if len(selected_tracks) == 1
         else (
-            Path.cwd()
-            / f"track{args.track:02d}.wav"
-        ).resolve()
+            f"tracks{first_track['number']:02d}-"
+            f"{last_track['number']:02d}"
+        )
     )
+
+    output_jobs = build_output_jobs(
+        selected_tracks,
+        args.batch,
+        output=args.output,
+    )
+
+    output_paths = [
+        job["wav_path"]
+        for job in output_jobs
+    ]
 
     if concise:
         print(
-            f"Ripping track {args.track:02d} from "
+            f"Ripping track{'' if len(selected_tracks) == 1 else 's'} "
+            f"{track_label} from "
             f"sector {logical_start_lba} to "
             f"{logical_end_lba - 1}"
         )
-        print(
-            f"Output: {wav_path}"
-        )
+
+        if args.batch:
+            print(
+                f"Output: {len(output_paths)} batch WAV files"
+            )
+        else:
+            print(
+                f"Output: {output_paths[0]}"
+            )
 
     before = snapshot_files(
         workdir
     )
 
-    if wav_path.exists():
-        wav_path.unlink()
+    for output_path in output_paths:
+        if output_path.exists():
+            output_path.unlink()
 
     # --------------------------------------------------------------
     # Commands
@@ -1422,6 +1662,7 @@ def extract_track(args, workdir):
                 if concise
                 else None
             ),
+            progress_tracks=selected_tracks,
         )
     )
 
@@ -1497,6 +1738,7 @@ def extract_track(args, workdir):
                     if concise
                     else None
                 ),
+                progress_tracks=selected_tracks,
             )
         )
 
@@ -1617,17 +1859,25 @@ def extract_track(args, workdir):
     )
 
     try:
-        (
-            segments,
-            cue_path,
-            pregap_skipped,
-        ) = identify_generated_audio_segments(
-            workdir,
-            image_name,
-            changed,
-            args.track,
-            expected_sectors,
+        track_zero_sectors = (
+            first_track["length"]
+            if first_track["number"] == 0
+            else None
         )
+
+        for job in output_jobs:
+            (
+                job["segments"],
+                job["cue_path"],
+                job["pregap_skipped"],
+            ) = identify_generated_audio_segments(
+                workdir,
+                image_name,
+                changed,
+                job["requested_track"],
+                job["expected_sectors"],
+                track_zero_sectors=track_zero_sectors,
+            )
 
     except RuntimeError as exc:
         sys.exit(
@@ -1642,17 +1892,22 @@ def extract_track(args, workdir):
     try:
         if concise:
             print(
-                "Writing WAV...",
+                (
+                    f"Writing {len(output_jobs)} WAV files..."
+                    if args.batch
+                    else "Writing WAV..."
+                ),
                 end="",
                 flush=True,
             )
 
-        segments_to_wav(
-            segments,
-            wav_path,
-            expected_sectors,
-            verbose=args.verbose,
-        )
+        for job in output_jobs:
+            segments_to_wav(
+                job["segments"],
+                job["wav_path"],
+                job["expected_sectors"],
+                verbose=args.verbose,
+            )
 
         if concise:
             print(" done")
@@ -1662,11 +1917,12 @@ def extract_track(args, workdir):
         if concise:
             print(" failed")
 
-        if wav_path.exists():
-            try:
-                wav_path.unlink()
-            except OSError:
-                pass
+        for output_path in output_paths:
+            if output_path.exists():
+                try:
+                    output_path.unlink()
+                except OSError:
+                    pass
 
         if isinstance(
             exc,
@@ -1688,8 +1944,8 @@ def extract_track(args, workdir):
         print("========")
 
         print(
-            f"Track:              "
-            f"{args.track:02d}"
+            f"Tracks:             "
+            f"{track_label}"
         )
 
         print(
@@ -1730,19 +1986,20 @@ def extract_track(args, workdir):
         )
 
         print(
-            f"Own pregap skipped: "
-            f"{pregap_skipped:,} sectors"
+            f"Initial BIN offset: "
+            f"{output_jobs[0]['pregap_skipped']:,} sectors"
         )
 
         print(
             f"Temporary CUE:      "
-            f"{cue_path}"
+            f"{output_jobs[0]['cue_path']}"
         )
 
-        print(
-            f"WAV:                "
-            f"{wav_path}"
-        )
+        for output_path in output_paths:
+            print(
+                f"WAV:                "
+                f"{output_path}"
+            )
 
         print()
         if unresolved_errors:

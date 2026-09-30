@@ -1,6 +1,6 @@
 # riptrack-redump
 
-`riptrack-redump` extracts one audio-CD track on Linux using
+`riptrack-redump` extracts one or more contiguous audio-CD tracks on Linux using
 **cdparanoia** only for logical track layout and **redumper** for the
 actual preservation-oriented extraction.
 
@@ -23,8 +23,35 @@ Typical optional controls:
 ./riptrack-redump /dev/sg4 2 --retries=100 --refine-passes=3
 ```
 
+Track selections may be a single track or a contiguous range:
+
+``` bash
+./riptrack-redump /dev/sg4 2      # Track 2
+./riptrack-redump /dev/sg4 1-3    # Tracks 1 through 3
+./riptrack-redump /dev/sg4 -3     # Tracks 1 through 3
+./riptrack-redump /dev/sg4 3-     # Track 3 through the final track
+./riptrack-redump /dev/sg4 0-3    # Track 0 through Track 3
+```
+
+An open-start range such as `-3` begins at Track 1 and does not include
+Track 0. Track 0 must be requested explicitly. A multi-track selection
+is read by one redumper dump covering the full contiguous LBA range; it
+is not implemented as separate per-track dumps.
+
+By default, a multi-track range is written as one `track.wav`. Use
+`-B` or `--batch` to package the same single dump as separate
+`trackNN.wav` files at the logical track boundaries:
+
+``` bash
+./riptrack-redump /dev/sg4 1-3 --batch
+```
+
+`--output=PATH` sets the combined output filename and cannot be used
+with `--batch`.
+
 Normal output is concise, with a track summary and single-line progress
-for dumping and refinement. Use `-v` or `--verbose` to show executed
+showing the current track and percentage during dumping and refinement.
+Use `-v` or `--verbose` to show executed
 commands, complete redumper output, exact ranges, split segments, and
 the full integrity summary:
 
@@ -45,8 +72,9 @@ state, BIN, and CUE files. The workspace is removed after success,
 failure, or interruption. The completed WAV is written outside that
 workspace and is retained.
 
-Use `--output=PATH` to choose the final WAV filename and location. By
-default, Track N is written as `trackNN.wav` in the current directory.
+For a single track, the default output is `trackNN.wav`; for a
+multi-track range, it is `track.wav`. Use `--output=PATH` to choose a
+different combined WAV filename and location.
 
 To inspect the disc's audio-track boundaries without dumping anything,
 omit the track number and use:
@@ -68,6 +96,11 @@ The end is exclusive. The output begins at Track N **INDEX 01**,
 includes its program audio and the following track's **INDEX 00
 pregap**, and stops immediately before Track N+1 INDEX 01. The selected
 track's own INDEX 00 pregap is excluded.
+
+For a range, `logical_start` is the first selected track's start and
+`logical_end` is the last selected track's exclusive end. Redumper reads
+that complete physical range once, with the same one-sector endpoint
+padding used for a single track.
 
 redumper performs the actual read. It must physically read one extra
 sector at the end:
@@ -235,6 +268,11 @@ alignment. Do not encode 48 as a universal production offset.
 
 -   cdparanoia determines boundaries only; redumper extracts the audio.
 -   Track 0 spans LBA 0 through Track 1's start, end exclusive.
+-   A range starts at its first selected track boundary and ends at its
+    last selected track's exclusive logical endpoint.
+-   A range uses one physical dump and one force-split operation.
+-   Batch mode changes WAV packaging only; it does not perform separate
+    per-track dumps.
 -   For Tracks 1+, output starts at the selected Track INDEX 01.
 -   For Tracks 1+, the selected Track INDEX 00 pregap is excluded.
 -   Following Track INDEX 00 pregap is included.

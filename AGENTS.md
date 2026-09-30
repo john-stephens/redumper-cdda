@@ -2,9 +2,9 @@
 
 ## Mission
 
-Maintain `riptrack-redump`, a Linux utility that extracts one audio-CD
-track with redumper while using cdparanoia only to determine logical
-track boundaries.
+Maintain `riptrack-redump`, a Linux utility that extracts one or more
+contiguous audio-CD tracks with redumper while using cdparanoia only to
+determine logical track boundaries.
 
 Read `README.md` before changing extraction behavior. The rules below
 encode behavior already established through hardware testing and must be
@@ -52,6 +52,29 @@ Fail if Track 1 begins at LBA 0 because no positive-length Track 0
 exists. After splitting, Track 1's file-relative INDEX 01 must equal the
 Track 0 length reported by cdparanoia. Track 0 output starts at sector
 zero of Track 1's AUDIO BIN and stops immediately before INDEX 01.
+
+### Track ranges
+
+Accepted selections are `N`, `N-M`, `-M`, and `N-`. An omitted start
+means Track 1, never Track 0. Track 0 must be explicit, such as `0-3`.
+
+For a resolved contiguous selection:
+
+``` text
+logical_start = first selected track begin
+logical_end   = last selected track end
+expected_sectors = logical_end - logical_start
+```
+
+Perform exactly one initial redumper dump for the entire range and use
+the same entire range for refinement. Never implement ranges as one
+redumper dump per track.
+
+Without `--batch`, a multi-track range produces one `track.wav`. With
+`-B` or `--batch`, split the already dumped range at the established
+logical track boundaries and write `trackNN.wav` files. Batch mode is a
+packaging step and must not trigger additional dump, refine, or split
+commands.
 
 ### Pregap semantics
 
@@ -257,6 +280,10 @@ Fail closed and do not leave a misleading WAV when:
 If WAV creation has begun when a failure occurs, remove the incomplete
 WAV.
 
+For batch output, a failure or interruption during any WAV must remove
+every WAV created for that batch so a partial set is never presented as
+complete.
+
 Create redumper's intermediate files in a unique temporary workspace.
 Remove that workspace after success, failure, SIGINT, SIGHUP, or SIGTERM.
 Stop an active child process before removing its workspace. Keep only a
@@ -283,6 +310,10 @@ Prefer unit tests for pure parsing/range functions. Cover:
 -   Track 0 CUE INDEX 01 agreement with cdparanoia length;
 -   following track pregap inclusion;
 -   exact range assembly across two or more BINs;
+-   all four track selection forms;
+-   open-start ranges exclude Track 0;
+-   combined ranges produce one `track.wav`;
+-   batch ranges produce correctly bounded `trackNN.wav` files;
 -   insufficient split data;
 -   exact PCM payload size.
 
@@ -331,6 +362,8 @@ Before completing a change, verify:
 -   [ ] cdparanoia is still boundary-only;
 -   [ ] Tracks 1+ begin at the selected Track N INDEX 01;
 -   [ ] Track 0 begins at LBA 0 and ends at Track 1 INDEX 01;
+-   [ ] a range is acquired with one dump over its full physical range;
+-   [ ] batch mode only changes WAV packaging;
 -   [ ] Track N's own pregap is excluded;
 -   [ ] Track N+1's pregap is included;
 -   [ ] final sector count equals cdparanoia length;
