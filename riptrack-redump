@@ -458,6 +458,34 @@ def find_track(tracks, number):
     )
 
 
+def find_requested_track(tracks, number):
+    if number != 0:
+        return find_track(
+            tracks,
+            number,
+        )
+
+    track_one = find_track(
+        tracks,
+        1,
+    )
+    length = track_one["begin"]
+
+    if length <= 0:
+        raise RuntimeError(
+            "Track 0 does not exist: Track 1 starts at LBA 0."
+        )
+
+    return {
+        "number": 0,
+        "length": length,
+        "length_msf": sectors_to_msf(length),
+        "begin": 0,
+        "begin_msf": "00:00.00",
+        "end": track_one["begin"],
+    }
+
+
 def print_disc_layout(tracks):
     print()
     print("Audio track layout")
@@ -789,13 +817,18 @@ def identify_generated_audio_segments(
             continue
 
         start_index = None
+        cue_track_number = (
+            1
+            if requested_track == 0
+            else requested_track
+        )
 
         for index, cue_track in enumerate(
             cue_tracks
         ):
             if (
                 cue_track["number"]
-                == requested_track
+                == cue_track_number
                 and cue_track["type"]
                 == "AUDIO"
             ):
@@ -805,7 +838,7 @@ def identify_generated_audio_segments(
         if start_index is None:
             errors.append(
                 f"{cue_path}: "
-                f"Track {requested_track:02d} "
+                f"Track {cue_track_number:02d} "
                 "not found as AUDIO"
             )
             continue
@@ -824,6 +857,18 @@ def identify_generated_audio_segments(
         except RuntimeError as exc:
             errors.append(
                 f"{cue_path}: {exc}"
+            )
+            continue
+
+        if (
+            requested_track == 0
+            and selected_start_sector
+            != expected_sectors
+        ):
+            errors.append(
+                f"{cue_path}: Track 1 INDEX 01 is at "
+                f"sector {selected_start_sector:,}, expected "
+                f"{expected_sectors:,} from cdparanoia"
             )
             continue
 
@@ -854,7 +899,15 @@ def identify_generated_audio_segments(
                 bin_sector_count(path)
             )
 
-            if relative_index == 0:
+            if (
+                requested_track == 0
+                and relative_index > 0
+            ):
+                break
+
+            if requested_track == 0:
+                start_sector = 0
+            elif relative_index == 0:
                 start_sector = (
                     selected_start_sector
                 )
@@ -897,7 +950,11 @@ def identify_generated_audio_segments(
                 return (
                     segments,
                     cue_path,
-                    selected_start_sector,
+                    (
+                        0
+                        if requested_track == 0
+                        else selected_start_sector
+                    ),
                 )
 
         errors.append(
@@ -1154,7 +1211,7 @@ def main():
 
     if (
         args.track is not None
-        and args.track < 1
+        and args.track < 0
     ):
         sys.exit(
             "ERROR: invalid track number"
@@ -1243,7 +1300,7 @@ def extract_track(args, workdir):
             verbose=args.verbose,
         )
 
-        track = find_track(
+        track = find_requested_track(
             tracks,
             args.track,
         )

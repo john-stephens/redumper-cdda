@@ -26,7 +26,7 @@ context but do not override the extraction invariants in this file.
 
 ### Logical range
 
-For Track N:
+For Track N where N is 1 or greater:
 
 ``` text
 logical_start = cdparanoia begin
@@ -39,15 +39,32 @@ logical_end   = begin + length
 track.length * 2352 bytes
 ```
 
+Track 0 is the explicit exception used for hidden audio in the pregap
+before Track 1:
+
+``` text
+logical_start = 0
+logical_end   = Track 1 begin
+length        = Track 1 begin
+```
+
+Fail if Track 1 begins at LBA 0 because no positive-length Track 0
+exists. After splitting, Track 1's file-relative INDEX 01 must equal the
+Track 0 length reported by cdparanoia. Track 0 output starts at sector
+zero of Track 1's AUDIO BIN and stops immediately before INDEX 01.
+
 ### Pregap semantics
 
-Output means:
+For Track N where N is 1 or greater, output means:
 
 ``` text
 Track N INDEX 01
     through
 just before Track N+1 INDEX 01
 ```
+
+For Track 0 specifically, output means LBA 0 through just before Track 1
+INDEX 01.
 
 Therefore:
 
@@ -261,6 +278,9 @@ Prefer unit tests for pure parsing/range functions. Cover:
 -   INDEX 01 conversion;
 -   selected track with no pregap;
 -   selected track with an INDEX 00 pregap;
+-   Track 0 with a positive Track 1 start;
+-   Track 0 rejection when Track 1 begins at LBA 0;
+-   Track 0 CUE INDEX 01 agreement with cdparanoia length;
 -   following track pregap inclusion;
 -   exact range assembly across two or more BINs;
 -   insufficient split data;
@@ -309,7 +329,8 @@ sectors are read or copied.
 Before completing a change, verify:
 
 -   [ ] cdparanoia is still boundary-only;
--   [ ] selected output begins at Track N INDEX 01;
+-   [ ] Tracks 1+ begin at the selected Track N INDEX 01;
+-   [ ] Track 0 begins at LBA 0 and ends at Track 1 INDEX 01;
 -   [ ] Track N's own pregap is excluded;
 -   [ ] Track N+1's pregap is included;
 -   [ ] final sector count equals cdparanoia length;

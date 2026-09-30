@@ -87,6 +87,26 @@ selected track's file-relative INDEX 01. The script starts there, then
 consumes subsequent AUDIO BINs from sector zero until exactly
 `cdparanoia`'s reported track length has been collected.
 
+### Track 0 / hidden audio
+
+Track `0` represents the pregap before Track 1. Its logical range is:
+
+``` text
+logical_start = 0
+logical_end   = Track 1 begin
+```
+
+For example, if cdparanoia reports that Track 1 begins at LBA 300,
+Track 0 contains LBAs `0..300` with 300 as the exclusive endpoint. The
+generated CUE must place Track 1 INDEX 01 at the same file-relative
+sector. The physical redumper read still extends one sector beyond the
+logical endpoint. If Track 1 begins at LBA 0, Track 0 does not exist and
+the command fails without creating a WAV.
+
+``` bash
+./riptrack-redump /dev/sg4 0
+```
+
 ## PCM handling
 
 Do **not** byte-swap redumper's split audio BIN data. Write the selected
@@ -214,8 +234,9 @@ alignment. Do not encode 48 as a universal production offset.
 ## Important invariants
 
 -   cdparanoia determines boundaries only; redumper extracts the audio.
--   Output starts at selected Track INDEX 01.
--   Selected Track INDEX 00 pregap is excluded.
+-   Track 0 spans LBA 0 through Track 1's start, end exclusive.
+-   For Tracks 1+, output starts at the selected Track INDEX 01.
+-   For Tracks 1+, the selected Track INDEX 00 pregap is excluded.
 -   Following Track INDEX 00 pregap is included.
 -   Output is exactly cdparanoia's reported track length.
 -   redumper reads one extra physical ending sector.

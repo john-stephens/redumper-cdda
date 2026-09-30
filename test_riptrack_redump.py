@@ -4,6 +4,7 @@ import io
 import os
 import signal
 import sys
+import tempfile
 import threading
 import unittest
 from contextlib import redirect_stdout
@@ -303,6 +304,116 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                 True,
             )
         )
+
+    def test_track_zero_uses_track_one_begin(self):
+        tracks = [
+            {
+                "number": 1,
+                "length": 1000,
+                "length_msf": "00:13.25",
+                "begin": 300,
+                "begin_msf": "00:04.00",
+                "end": 1300,
+            }
+        ]
+
+        track = self.module.find_requested_track(
+            tracks,
+            0,
+        )
+
+        self.assertEqual(track["begin"], 0)
+        self.assertEqual(track["end"], 300)
+        self.assertEqual(track["length"], 300)
+
+    def test_track_zero_rejected_without_pregap(self):
+        tracks = [
+            {
+                "number": 1,
+                "length": 1000,
+                "length_msf": "00:13.25",
+                "begin": 0,
+                "begin_msf": "00:00.00",
+                "end": 1000,
+            }
+        ]
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "Track 0 does not exist",
+        ):
+            self.module.find_requested_track(
+                tracks,
+                0,
+            )
+
+    def test_track_zero_uses_track_one_bin_before_index01(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workdir = Path(directory)
+            cue_path = workdir / "track00.cue"
+            bin_path = workdir / "track01.bin"
+
+            cue_path.write_text(
+                'FILE "track01.bin" BINARY\n'
+                '  TRACK 01 AUDIO\n'
+                '    INDEX 00 00:00:00\n'
+                '    INDEX 01 00:04:00\n',
+                encoding="utf-8",
+            )
+            bin_path.write_bytes(
+                bytes(301 * self.module.SECTOR_SIZE)
+            )
+
+            segments, selected_cue, skipped = (
+                self.module.identify_generated_audio_segments(
+                    workdir,
+                    "track00",
+                    [cue_path, bin_path],
+                    0,
+                    300,
+                )
+            )
+
+            self.assertEqual(selected_cue, cue_path)
+            self.assertEqual(skipped, 0)
+            self.assertEqual(len(segments), 1)
+            self.assertEqual(
+                segments[0]["start_sector"],
+                0,
+            )
+            self.assertEqual(
+                segments[0]["sectors"],
+                300,
+            )
+
+    def test_track_zero_rejects_cue_boundary_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workdir = Path(directory)
+            cue_path = workdir / "track00.cue"
+            bin_path = workdir / "track01.bin"
+
+            cue_path.write_text(
+                'FILE "track01.bin" BINARY\n'
+                '  TRACK 01 AUDIO\n'
+                '    INDEX 00 00:00:00\n'
+                '    INDEX 01 00:04:00\n',
+                encoding="utf-8",
+            )
+            bin_path.write_bytes(
+                bytes(301 * self.module.SECTOR_SIZE)
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "expected 299 from cdparanoia",
+            ):
+                self.module.identify_generated_audio_segments(
+                    workdir,
+                    "track00",
+                    [cue_path, bin_path],
+                    0,
+                    299,
+                )
 
     def test_sigterm_stops_child_and_removes_workspace(self):
         workspaces = []
