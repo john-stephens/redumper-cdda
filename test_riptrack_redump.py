@@ -161,15 +161,11 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             mock.patch.object(
                 self.module.shutil,
                 "which",
-                side_effect=lambda command: (
-                    "/mock/cdparanoia"
-                    if command == "cdparanoia"
-                    else None
-                ),
+                return_value="/mock/tool",
             ),
             mock.patch.object(
                 self.module,
-                "read_disc_toc",
+                "read_disc_layout",
                 return_value=tracks,
             ),
             mock.patch.object(
@@ -276,6 +272,56 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             rendered,
         )
 
+    def test_progress_identifies_omitted_data_track(self):
+        output = io.StringIO()
+        tracks = [
+            {
+                "number": 1,
+                "begin": 0,
+                "end": 100,
+            },
+            {
+                "number": 3,
+                "begin": 200,
+                "end": 300,
+            },
+        ]
+
+        with redirect_stdout(output):
+            returncode, _captured = (
+                self.module.run_command_capture(
+                    [
+                        sys.executable,
+                        "-c",
+                        (
+                            "print('[ 25%] LBA: 50/300'); "
+                            "print('[ 50%] LBA: 150/300'); "
+                            "print('[ 75%] LBA: 250/300')"
+                        ),
+                    ],
+                    progress_label="Reading",
+                    progress_tracks=tracks,
+                )
+            )
+
+        rendered = output.getvalue().replace(
+            "\r",
+            "",
+        )
+        self.assertEqual(returncode, 0)
+        self.assertIn(
+            "Reading track 01:  25%",
+            rendered,
+        )
+        self.assertIn(
+            "Reading data:  50%",
+            rendered,
+        )
+        self.assertIn(
+            "Reading track 03:  75%",
+            rendered,
+        )
+
     def test_verbose_command_output_is_unfiltered(self):
         output = io.StringIO()
 
@@ -355,6 +401,236 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                 True,
             )
         )
+
+    def make_mmc_toc_response(
+        self,
+        descriptors,
+        first_track=1,
+        last_track=None,
+    ):
+        if last_track is None:
+            regular_tracks = [
+                number
+                for number, _control, _lba
+                in descriptors
+                if number != 0xAA
+            ]
+            last_track = max(regular_tracks)
+
+        body = bytearray(
+            [first_track, last_track]
+        )
+
+        for number, control, lba in descriptors:
+            body.extend(
+                bytes(
+                    [
+                        0,
+                        0x10 | control,
+                        number,
+                        0,
+                    ]
+                )
+            )
+            body.extend(
+                lba.to_bytes(
+                    4,
+                    byteorder="big",
+                )
+            )
+
+        return (
+            len(body).to_bytes(
+                2,
+                byteorder="big",
+            )
+            + body
+        )
+
+    def test_parse_mmc_toc_includes_audio_and_data(self):
+        response = self.make_mmc_toc_response(
+            [
+                (1, 0x04, 0),
+                (2, 0x00, 100),
+                (0xAA, 0x04, 250),
+            ]
+        )
+
+        tracks = self.module.parse_mmc_toc(
+            response
+        )
+
+        self.assertEqual(
+            [track["number"] for track in tracks],
+            [1, 2],
+        )
+        self.assertEqual(
+            [track["kind"] for track in tracks],
+            ["data", "audio"],
+        )
+        self.assertEqual(
+            [track["length"] for track in tracks],
+            [100, 150],
+        )
+        self.assertEqual(tracks[1]["end"], 250)
+
+    def test_parse_mmc_toc_rejects_truncated_response(self):
+        response = self.make_mmc_toc_response(
+            [
+                (1, 0x00, 0),
+                (0xAA, 0x00, 100),
+            ]
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "truncated",
+        ):
+            self.module.parse_mmc_toc(
+                response[:-1]
+            )
+
+    def test_reconcile_disc_layout_preserves_data(self):
+        mmc_tracks = [
+            {
+                "number": 1,
+                "kind": "data",
+                "control": 4,
+                "length": 100,
+                "length_msf": "00:01:25",
+                "begin": 0,
+                "begin_msf": "00:00:00",
+                "end": 100,
+            },
+            {
+                "number": 2,
+                "kind": "audio",
+                "control": 0,
+                "length": 150,
+                "length_msf": "00:02:00",
+                "begin": 100,
+                "begin_msf": "00:01:25",
+                "end": 250,
+            },
+        ]
+        audio_tracks = [
+            {
+                "number": 2,
+                "length": 150,
+                "length_msf": "00:02.00",
+                "begin": 100,
+                "begin_msf": "00:01.25",
+                "end": 250,
+            }
+        ]
+
+        tracks = self.module.reconcile_disc_layout(
+            mmc_tracks,
+            audio_tracks,
+        )
+
+        self.assertEqual(
+            [track["kind"] for track in tracks],
+            ["data", "audio"],
+        )
+        self.assertEqual(
+            tracks[1]["length_msf"],
+            "00:02.00",
+        )
+
+    def test_reconcile_disc_layout_rejects_boundary_mismatch(self):
+        mmc_tracks = [
+            {
+                "number": 1,
+                "kind": "audio",
+                "control": 0,
+                "length": 100,
+                "length_msf": "00:01:25",
+                "begin": 0,
+                "begin_msf": "00:00:00",
+                "end": 100,
+            }
+        ]
+        audio_tracks = [
+            {
+                "number": 1,
+                "length": 99,
+                "length_msf": "00:01.24",
+                "begin": 0,
+                "begin_msf": "00:00.00",
+                "end": 99,
+            }
+        ]
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "boundaries disagree",
+        ):
+            self.module.reconcile_disc_layout(
+                mmc_tracks,
+                audio_tracks,
+            )
+
+    def test_data_only_layout_does_not_call_cdparanoia(self):
+        data_tracks = [
+            {
+                "number": 1,
+                "kind": "data",
+                "control": 4,
+                "length": 100,
+                "length_msf": "00:01:25",
+                "begin": 0,
+                "begin_msf": "00:00:00",
+                "end": 100,
+            }
+        ]
+
+        with (
+            mock.patch.object(
+                self.module,
+                "read_mmc_toc",
+                return_value=data_tracks,
+            ),
+            mock.patch.object(
+                self.module,
+                "read_disc_toc",
+            ) as read_audio_toc,
+        ):
+            tracks = self.module.read_disc_layout(
+                "/dev/sg-test"
+            )
+
+        self.assertEqual(tracks, data_tracks)
+        read_audio_toc.assert_not_called()
+
+    def test_print_disc_layout_shows_track_types(self):
+        output = io.StringIO()
+        tracks = [
+            {
+                "number": 1,
+                "kind": "data",
+                "length": 100,
+                "begin": 0,
+                "end": 100,
+            },
+            {
+                "number": 2,
+                "kind": "audio",
+                "length": 150,
+                "begin": 100,
+                "end": 250,
+            },
+        ]
+
+        with redirect_stdout(output):
+            self.module.print_disc_layout(
+                tracks
+            )
+
+        rendered = output.getvalue()
+        self.assertIn("Disc track layout", rendered)
+        self.assertIn("data", rendered)
+        self.assertIn("audio", rendered)
 
     def test_track_zero_uses_track_one_begin(self):
         tracks = [
@@ -648,12 +924,15 @@ class TemporaryWorkspaceTests(unittest.TestCase):
     def test_batch_range_uses_one_dump_and_one_split(self):
         tracks = self.make_range_tracks()[:2]
 
+        for track in tracks:
+            track["kind"] = "audio"
+
         with tempfile.TemporaryDirectory() as directory:
             workdir = Path(directory)
             output_jobs = [
                 {
                     "track": track,
-                    "requested_track": track["number"],
+                    "component_tracks": [track],
                     "expected_sectors": track["length"],
                     "wav_path": (
                         workdir
@@ -685,7 +964,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             with (
                 mock.patch.object(
                     self.module,
-                    "read_disc_toc",
+                    "read_disc_layout",
                     return_value=tracks,
                 ),
                 mock.patch.object(
@@ -721,6 +1000,31 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             self.assertEqual(run_split.call_count, 1)
             self.assertEqual(identify.call_count, 2)
             self.assertEqual(write_wav.call_count, 2)
+
+    def test_open_range_omits_data_tracks(self):
+        tracks = self.make_range_tracks()[1:3]
+
+        selected = self.module.resolve_track_selection(
+            tracks,
+            self.module.parse_track_selection("-3"),
+        )
+
+        self.assertEqual(
+            [track["number"] for track in selected],
+            [2, 3],
+        )
+
+    def test_bounded_range_rejects_data_tracks(self):
+        tracks = self.make_range_tracks()[1:3]
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "Audio track 1 was not found",
+        ):
+            self.module.resolve_track_selection(
+                tracks,
+                self.module.parse_track_selection("1-3"),
+            )
 
     def test_sigterm_stops_child_and_removes_workspace(self):
         workspaces = []

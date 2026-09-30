@@ -1,12 +1,14 @@
 # riptrack-redump
 
-`riptrack-redump` extracts one or more contiguous audio-CD tracks on Linux using
-**cdparanoia** only for logical track layout and **redumper** for the
-actual preservation-oriented extraction.
+`riptrack-redump` extracts one or more contiguous audio-CD tracks on Linux.
+It reads the complete audio/data layout with MMC `READ TOC`, validates every
+audio boundary against **cdparanoia**, and uses **redumper** for the actual
+preservation-oriented extraction.
 
 ## Requirements
 
 -   Linux / Python 3
+-   `sg_raw` from sg3-utils
 -   `cdparanoia`
 -   `redumper`
 -   Optical drive exposed as a SCSI generic device such as `/dev/sg4`
@@ -37,6 +39,12 @@ An open-start range such as `-3` begins at Track 1 and does not include
 Track 0. Track 0 must be requested explicitly. A multi-track selection
 is read by one redumper dump covering the full contiguous LBA range; it
 is not implemented as separate per-track dumps.
+
+Open-ended ranges automatically omit data tracks. Fully bounded ranges
+are strict: every numbered track in `N-M` must be audio. For example, if
+Track 1 is data, `-3` extracts audio Tracks 2 and 3, while `1-3` fails.
+The physical range is still read once; data-track payload is excluded
+when the AUDIO segments are assembled into WAV output.
 
 By default, a multi-track range is written as one `track.wav`. Use
 `-B` or `--batch` to package the same single dump as separate
@@ -76,7 +84,7 @@ For a single track, the default output is `trackNN.wav`; for a
 multi-track range, it is `track.wav`. Use `--output=PATH` to choose a
 different combined WAV filename and location.
 
-To inspect the disc's audio-track boundaries without dumping anything,
+To inspect the complete audio/data track layout without dumping anything,
 omit the track number and use:
 
 ``` bash
@@ -85,7 +93,14 @@ omit the track number and use:
 
 ## Extraction algorithm
 
-`cdparanoia -Q` supplies the selected track's `begin` and `length`:
+An MMC `READ TOC` command supplies every track's INDEX 01 start, audio/data
+control bit, and the lead-out address. The next track's start, or lead-out for
+the final track, establishes each exclusive end. During this migration stage,
+`cdparanoia -Q` independently supplies each audio track's `begin` and `length`.
+The command fails closed if the two sources disagree about any audio track's
+type or sector boundaries.
+
+For a selected audio track:
 
 ``` text
 logical_start = begin

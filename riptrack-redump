@@ -13,6 +13,7 @@ from pathlib import Path
 
 SECTOR_SIZE = 2352
 SECTORS_PER_SECOND = 75
+MMC_TOC_ALLOCATION_LENGTH = 804
 SAMPLE_RATE = 44100
 CHANNELS = 2
 SAMPLE_WIDTH = 2
@@ -113,10 +114,27 @@ def track_number_for_lba(tracks, lba):
     if tracks and lba >= tracks[-1]["end"]:
         return tracks[-1]["number"]
 
-    if tracks:
+    if tracks and lba < tracks[0]["begin"]:
         return tracks[0]["number"]
 
     return None
+
+
+def format_progress_label(
+    progress_label,
+    current_track,
+    progress_tracks,
+):
+    if current_track is not None:
+        return (
+            f"{progress_label} track "
+            f"{current_track:02d}"
+        )
+
+    if progress_tracks:
+        return f"{progress_label} data"
+
+    return progress_label
 
 
 def run_command_capture(
@@ -143,10 +161,10 @@ def run_command_capture(
             if progress_tracks
             else None
         )
-        display_label = (
-            f"{progress_label} track {current_track:02d}"
-            if current_track is not None
-            else progress_label
+        display_label = format_progress_label(
+            progress_label,
+            current_track,
+            progress_tracks,
         )
         print(
             f"{display_label}:   0%",
@@ -208,11 +226,10 @@ def run_command_capture(
                     )
 
                     if progress != last_progress:
-                        display_label = (
-                            f"{progress_label} track "
-                            f"{current_track:02d}"
-                            if current_track is not None
-                            else progress_label
+                        display_label = format_progress_label(
+                            progress_label,
+                            current_track,
+                            progress_tracks,
                         )
                         print(
                             f"\r{display_label}: "
@@ -394,8 +411,220 @@ def should_abort_on_errors(
 
 
 # ----------------------------------------------------------------------
-# cdparanoia TOC
+# Disc layout
 # ----------------------------------------------------------------------
+
+def parse_mmc_toc(data):
+    if len(data) < 4:
+        raise RuntimeError(
+            "MMC READ TOC response is shorter than its header."
+        )
+
+    data_length = int.from_bytes(
+        data[0:2],
+        byteorder="big",
+    )
+    response_length = data_length + 2
+
+    if data_length < 10:
+        raise RuntimeError(
+            "MMC READ TOC response contains no track layout."
+        )
+
+    if response_length > len(data):
+        raise RuntimeError(
+            "MMC READ TOC response is truncated."
+        )
+
+    descriptor_data = data[4:response_length]
+
+    if len(descriptor_data) % 8 != 0:
+        raise RuntimeError(
+            "MMC READ TOC response has malformed descriptors."
+        )
+
+    first_track = data[2]
+    last_track = data[3]
+
+    if not (
+        1 <= first_track <= last_track <= 99
+    ):
+        raise RuntimeError(
+            "MMC READ TOC response has an invalid track range."
+        )
+
+    descriptors = {}
+    leadout_lba = None
+
+    for offset in range(
+        0,
+        len(descriptor_data),
+        8,
+    ):
+        descriptor = descriptor_data[
+            offset:offset + 8
+        ]
+        control = descriptor[1] & 0x0F
+        track_number = descriptor[2]
+        start_lba = int.from_bytes(
+            descriptor[4:8],
+            byteorder="big",
+        )
+
+        if track_number == 0xAA:
+            if leadout_lba is not None:
+                raise RuntimeError(
+                    "MMC READ TOC response contains multiple "
+                    "lead-out descriptors."
+                )
+
+            leadout_lba = start_lba
+            continue
+
+        if not (
+            first_track
+            <= track_number
+            <= last_track
+        ):
+            continue
+
+        if track_number in descriptors:
+            raise RuntimeError(
+                "MMC READ TOC response contains duplicate "
+                f"Track {track_number}."
+            )
+
+        descriptors[track_number] = {
+            "control": control,
+            "begin": start_lba,
+        }
+
+    expected_numbers = list(
+        range(first_track, last_track + 1)
+    )
+    missing_numbers = [
+        number
+        for number in expected_numbers
+        if number not in descriptors
+    ]
+
+    if missing_numbers:
+        missing = ", ".join(
+            str(number)
+            for number in missing_numbers
+        )
+        raise RuntimeError(
+            "MMC READ TOC response is missing track "
+            f"descriptor(s): {missing}."
+        )
+
+    if leadout_lba is None:
+        raise RuntimeError(
+            "MMC READ TOC response has no lead-out descriptor."
+        )
+
+    tracks = []
+
+    for index, number in enumerate(
+        expected_numbers
+    ):
+        descriptor = descriptors[number]
+        begin = descriptor["begin"]
+        end = (
+            descriptors[
+                expected_numbers[index + 1]
+            ]["begin"]
+            if index + 1 < len(expected_numbers)
+            else leadout_lba
+        )
+
+        if end <= begin:
+            raise RuntimeError(
+                "MMC READ TOC response has a non-positive "
+                f"length for Track {number}."
+            )
+
+        length = end - begin
+        kind = (
+            "data"
+            if descriptor["control"] & 0x04
+            else "audio"
+        )
+
+        tracks.append(
+            {
+                "number": number,
+                "kind": kind,
+                "control": descriptor["control"],
+                "length": length,
+                "length_msf": sectors_to_msf(length),
+                "begin": begin,
+                "begin_msf": sectors_to_msf(begin),
+                "end": end,
+            }
+        )
+
+    return tracks
+
+
+def read_mmc_toc(device, verbose=False):
+    allocation_msb = (
+        MMC_TOC_ALLOCATION_LENGTH >> 8
+    ) & 0xFF
+    allocation_lsb = (
+        MMC_TOC_ALLOCATION_LENGTH
+        & 0xFF
+    )
+    command = [
+        "sg_raw",
+        "--readonly",
+        "--binary",
+        f"--request={MMC_TOC_ALLOCATION_LENGTH}",
+        device,
+        "43",  # READ TOC/PMA/ATIP
+        "00",  # LBA addresses, TOC format 0
+        "00",
+        "00",
+        "00",
+        "00",  # start track
+        "00",
+        f"{allocation_msb:02x}",
+        f"{allocation_lsb:02x}",
+        "00",
+    ]
+
+    if verbose:
+        print(
+            "Reading complete track layout with MMC READ TOC..."
+        )
+
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    stdout, stderr = communicate_with_process(
+        process
+    )
+
+    if process.returncode != 0:
+        details = stderr.decode(
+            "utf-8",
+            errors="replace",
+        ).strip()
+        raise RuntimeError(
+            "MMC READ TOC failed"
+            + (
+                "\n\n" + details
+                if details
+                else ""
+            )
+        )
+
+    return parse_mmc_toc(
+        stdout
+    )
+
 
 def parse_cdparanoia_toc(text):
     tracks = []
@@ -502,6 +731,104 @@ def read_disc_toc(device, verbose=False):
     )
 
 
+def reconcile_disc_layout(
+    mmc_tracks,
+    cdparanoia_tracks,
+):
+    cdparanoia_by_number = {
+        track["number"]: track
+        for track in cdparanoia_tracks
+    }
+    mmc_audio_numbers = {
+        track["number"]
+        for track in mmc_tracks
+        if track["kind"] == "audio"
+    }
+    cdparanoia_numbers = set(
+        cdparanoia_by_number
+    )
+
+    if mmc_audio_numbers != cdparanoia_numbers:
+        raise RuntimeError(
+            "MMC and cdparanoia disagree about which tracks "
+            "are audio "
+            f"(MMC: {sorted(mmc_audio_numbers)}, "
+            f"cdparanoia: {sorted(cdparanoia_numbers)})."
+        )
+
+    reconciled = []
+
+    for mmc_track in mmc_tracks:
+        track = dict(mmc_track)
+
+        if track["kind"] == "audio":
+            cdparanoia_track = (
+                cdparanoia_by_number[
+                    track["number"]
+                ]
+            )
+            differing_fields = [
+                field
+                for field in (
+                    "begin",
+                    "end",
+                    "length",
+                )
+                if track[field]
+                != cdparanoia_track[field]
+            ]
+
+            if differing_fields:
+                values = ", ".join(
+                    f"{field}: MMC={track[field]}, "
+                    f"cdparanoia={cdparanoia_track[field]}"
+                    for field in differing_fields
+                )
+                raise RuntimeError(
+                    "MMC and cdparanoia boundaries disagree "
+                    f"for audio Track {track['number']} "
+                    f"({values})."
+                )
+
+            # Preserve cdparanoia's established display values and
+            # keep its sector boundaries authoritative during this
+            # validation stage.
+            track.update(
+                cdparanoia_track
+            )
+            track["kind"] = "audio"
+            track["control"] = (
+                mmc_track["control"]
+            )
+
+        reconciled.append(track)
+
+    return reconciled
+
+
+def read_disc_layout(device, verbose=False):
+    mmc_tracks = read_mmc_toc(
+        device,
+        verbose=verbose,
+    )
+
+    if not any(
+        track["kind"] == "audio"
+        for track in mmc_tracks
+    ):
+        return mmc_tracks
+
+    cdparanoia_tracks = read_disc_toc(
+        device,
+        verbose=verbose,
+    )
+
+    return reconcile_disc_layout(
+        mmc_tracks,
+        cdparanoia_tracks,
+    )
+
+
 def find_track(tracks, number):
     for track in tracks:
         if track["number"] == number:
@@ -592,8 +919,10 @@ def resolve_track_selection(
             "No audio tracks are available."
         )
 
-    start = selection["start"]
-    end = selection["end"]
+    explicit_start = selection["start"]
+    explicit_end = selection["end"]
+    start = explicit_start
+    end = explicit_end
 
     if start is None:
         start = 1
@@ -606,15 +935,42 @@ def resolve_track_selection(
             f"Invalid track range {start}-{end}."
         )
 
-    selected = []
-
-    for number in range(start, end + 1):
-        selected.append(
+    if (
+        explicit_start is not None
+        and explicit_end is not None
+    ):
+        selected = [
             find_requested_track(
                 tracks,
                 number,
             )
+            for number in range(start, end + 1)
+        ]
+    else:
+        explicit_number = (
+            explicit_start
+            if explicit_start is not None
+            else explicit_end
         )
+        find_requested_track(
+            tracks,
+            explicit_number,
+        )
+
+        selected = [
+            track
+            for track in tracks
+            if start <= track["number"] <= end
+        ]
+
+        if start == 0:
+            selected.insert(
+                0,
+                find_requested_track(
+                    tracks,
+                    0,
+                ),
+            )
 
     return selected
 
@@ -645,7 +1001,7 @@ def build_output_jobs(
         return [
             {
                 "track": track,
-                "requested_track": track["number"],
+                "component_tracks": [track],
                 "expected_sectors": track["length"],
                 "wav_path": (
                     directory
@@ -656,9 +1012,9 @@ def build_output_jobs(
         ]
 
     first_track = selected_tracks[0]
-    logical_sectors = (
-        selected_tracks[-1]["end"]
-        - first_track["begin"]
+    output_sectors = sum(
+        track["length"]
+        for track in selected_tracks
     )
     wav_path = (
         Path(output).expanduser().resolve()
@@ -676,8 +1032,8 @@ def build_output_jobs(
     return [
         {
             "track": None,
-            "requested_track": first_track["number"],
-            "expected_sectors": logical_sectors,
+            "component_tracks": selected_tracks,
+            "expected_sectors": output_sectors,
             "wav_path": wav_path,
         }
     ]
@@ -685,11 +1041,12 @@ def build_output_jobs(
 
 def print_disc_layout(tracks):
     print()
-    print("Audio track layout")
-    print("------------------")
+    print("Disc track layout")
+    print("-----------------")
 
     print(
         f"{'Track':>5}  "
+        f"{'Type':<5}  "
         f"{'Length':>10}  "
         f"{'Begin':>10}  "
         f"{'End':>10}"
@@ -698,6 +1055,7 @@ def print_disc_layout(tracks):
     for track in tracks:
         print(
             f"{track['number']:>5}  "
+            f"{track.get('kind', 'audio'):<5}  "
             f"{track['length']:>10}  "
             f"{track['begin']:>10}  "
             f"{track['end']:>10}"
@@ -1317,8 +1675,8 @@ def segments_to_wav(
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Extract one or more audio CD tracks using cdparanoia "
-            "for track boundaries and redumper for the "
+            "Extract one or more audio CD tracks using MMC and "
+            "cdparanoia for validated track boundaries and redumper for the "
             "actual offset-corrected extraction."
         )
     )
@@ -1390,7 +1748,7 @@ def main():
         "--show-layout",
         action="store_true",
         help=(
-            "Print the audio-track layout and exit "
+            "Print the complete audio/data track layout and exit "
             "without dumping"
         ),
     )
@@ -1445,9 +1803,16 @@ def main():
             "ERROR: cdparanoia not found"
         )
 
+    if shutil.which(
+        "sg_raw"
+    ) is None:
+        sys.exit(
+            "ERROR: sg_raw not found"
+        )
+
     if args.show_layout:
         try:
-            tracks = read_disc_toc(
+            tracks = read_disc_layout(
                 args.device,
                 verbose=args.verbose,
             )
@@ -1510,10 +1875,15 @@ def extract_track(args, workdir):
     # --------------------------------------------------------------
 
     try:
-        tracks = read_disc_toc(
+        disc_tracks = read_disc_layout(
             args.device,
             verbose=args.verbose,
         )
+        tracks = [
+            track
+            for track in disc_tracks
+            if track["kind"] == "audio"
+        ]
 
         selected_tracks = resolve_track_selection(
             tracks,
@@ -1546,8 +1916,10 @@ def extract_track(args, workdir):
     )
 
     expected_sectors = (
-        logical_end_lba
-        - logical_start_lba
+        sum(
+            track["length"]
+            for track in selected_tracks
+        )
     )
 
     dump_start_lba = (
@@ -1866,18 +2238,31 @@ def extract_track(args, workdir):
         )
 
         for job in output_jobs:
-            (
-                job["segments"],
-                job["cue_path"],
-                job["pregap_skipped"],
-            ) = identify_generated_audio_segments(
-                workdir,
-                image_name,
-                changed,
-                job["requested_track"],
-                job["expected_sectors"],
-                track_zero_sectors=track_zero_sectors,
-            )
+            job["segments"] = []
+            job["pregap_skipped"] = None
+
+            for component_track in job["component_tracks"]:
+                (
+                    component_segments,
+                    job["cue_path"],
+                    component_pregap_skipped,
+                ) = identify_generated_audio_segments(
+                    workdir,
+                    image_name,
+                    changed,
+                    component_track["number"],
+                    component_track["length"],
+                    track_zero_sectors=track_zero_sectors,
+                )
+
+                job["segments"].extend(
+                    component_segments
+                )
+
+                if job["pregap_skipped"] is None:
+                    job["pregap_skipped"] = (
+                        component_pregap_skipped
+                    )
 
     except RuntimeError as exc:
         sys.exit(

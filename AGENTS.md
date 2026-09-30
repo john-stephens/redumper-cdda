@@ -3,8 +3,9 @@
 ## Mission
 
 Maintain `riptrack-redump`, a Linux utility that extracts one or more
-contiguous audio-CD tracks with redumper while using cdparanoia only to
-determine logical track boundaries.
+contiguous audio-CD tracks with redumper. It reads the complete track layout
+with MMC `READ TOC` and retains cdparanoia as the validated authority for
+audio-track boundaries during the MMC migration.
 
 Read `README.md` before changing extraction behavior. The rules below
 encode behavior already established through hardware testing and must be
@@ -23,6 +24,20 @@ or output parsing. Treat them as local reference snapshots; they provide
 context but do not override the extraction invariants in this file.
 
 ## Non-negotiable extraction invariants
+
+### Disc layout sources
+
+Use MMC `READ TOC` format 0 to enumerate every numbered track, its audio/data
+control bit, its INDEX 01 start LBA, and lead-out. Derive each exclusive end
+from the next track's start or lead-out. `--show-layout` must display both
+audio and data tracks.
+
+For now, also read the audio-only cdparanoia layout. Every MMC audio track must
+exist in cdparanoia, every cdparanoia track must be audio in MMC, and their
+`begin`, `end`, and `length` values must agree exactly. Fail closed on any
+disagreement. Continue to use the reconciled cdparanoia values for audio
+extraction until hardware validation explicitly authorizes removing that
+dependency.
 
 ### Logical range
 
@@ -58,17 +73,26 @@ zero of Track 1's AUDIO BIN and stops immediately before INDEX 01.
 Accepted selections are `N`, `N-M`, `-M`, and `N-`. An omitted start
 means Track 1, never Track 0. Track 0 must be explicit, such as `0-3`.
 
+Treat cdparanoia's parsed track list as the audio-track set. Fully
+bounded `N-M` selections are strict and must fail if any number in the
+range is not an audio track. Open-start and open-end selections omit
+non-audio tracks automatically, but their explicitly supplied endpoint
+must itself be audio. Thus, with data Track 1, `-3` selects audio Tracks
+2 and 3 while `1-3` fails.
+
 For a resolved contiguous selection:
 
 ``` text
 logical_start = first selected track begin
 logical_end   = last selected track end
-expected_sectors = logical_end - logical_start
+physical_sectors = logical_end - logical_start
+output_sectors = sum(selected audio track lengths)
 ```
 
 Perform exactly one initial redumper dump for the entire range and use
 the same entire range for refinement. Never implement ranges as one
-redumper dump per track.
+redumper dump per track. A physical range may cross omitted data tracks;
+do not include their payload when assembling WAV output.
 
 Without `--batch`, a multi-track range produces one `track.wav`. With
 `-B` or `--batch`, split the already dumped range at the established
@@ -293,6 +317,10 @@ successfully completed final WAV.
 
 Prefer unit tests for pure parsing/range functions. Cover:
 
+-   MMC TOC parsing for audio tracks, data tracks, and lead-out;
+-   malformed or truncated MMC TOC responses;
+-   exact MMC/cdparanoia audio-boundary reconciliation;
+-   MMC/cdparanoia type or boundary disagreement fails closed;
 -   cdparanoia TOC parsing;
 -   media-error parsing for clean output;
 -   nonzero SCSI;
@@ -312,6 +340,8 @@ Prefer unit tests for pure parsing/range functions. Cover:
 -   exact range assembly across two or more BINs;
 -   all four track selection forms;
 -   open-start ranges exclude Track 0;
+-   open ranges omit data tracks;
+-   bounded ranges reject explicitly selected data tracks;
 -   combined ranges produce one `track.wav`;
 -   batch ranges produce correctly bounded `trackNN.wav` files;
 -   insufficient split data;
