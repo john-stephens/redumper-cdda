@@ -23,6 +23,21 @@ Typical optional controls:
 ./riptrack-redump /dev/sg4 2 --retries=100 --refine-passes=3
 ```
 
+Each run creates a unique temporary workspace for redumper's dump,
+state, BIN, and CUE files. The workspace is removed after success,
+failure, or interruption. The completed WAV is written outside that
+workspace and is retained.
+
+Use `--output=PATH` to choose the final WAV filename and location. By
+default, Track N is written as `trackNN.wav` in the current directory.
+
+To inspect the disc's audio-track boundaries without dumping anything,
+omit the track number and use:
+
+``` bash
+./riptrack-redump /dev/sg4 --show-layout
+```
+
 ## Extraction algorithm
 
 `cdparanoia -Q` supplies the selected track's `begin` and `length`:

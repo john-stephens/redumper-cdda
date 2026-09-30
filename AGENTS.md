@@ -219,6 +219,11 @@ Fail closed and do not leave a misleading WAV when:
 If WAV creation has begun when a failure occurs, remove the incomplete
 WAV.
 
+Create redumper's intermediate files in a unique temporary workspace.
+Remove that workspace after success, failure, SIGINT, SIGHUP, or SIGTERM.
+Stop an active child process before removing its workspace. Keep only a
+successfully completed final WAV.
+
 ## Tests Codex should add/maintain
 
 Prefer unit tests for pure parsing/range functions. Cover:
