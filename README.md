@@ -47,12 +47,6 @@ Install the command in an isolated environment with
 pipx install redumper-cdda
 ```
 
-Until the first PyPI release, install directly from GitHub instead:
-
-``` bash
-pipx install 'redumper-cdda @ git+https://github.com/john-stephens/redumper-cdda.git'
-```
-
 From an existing checkout, use `pipx install .`. The installation creates the
 `redumper-cdda` command on the user path. System tools such as redumper,
 cdparanoia, and `sg_raw` remain external requirements.
