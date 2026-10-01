@@ -87,7 +87,7 @@ logical endpoint. If Track 1 begins at LBA 0, Track 0 does not exist and
 the command fails without creating a WAV.
 
 ``` bash
-./riptrack-redump /dev/sg4 0
+riptrack-redump /dev/sg4 0
 ```
 
 ## PCM handling
@@ -122,7 +122,7 @@ With that option, unresolved SCSI/C2 errors cause a nonzero exit and no
 output is created:
 
 ``` bash
-./riptrack-redump /dev/sg4 2 --abort-on-skip
+riptrack-redump /dev/sg4 2 --abort-on-skip
 ```
 
 The desired control flow is:

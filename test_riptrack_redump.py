@@ -15,8 +15,11 @@ from pathlib import Path
 from unittest import mock
 
 
-SCRIPT_PATH = Path(__file__).with_name(
-    "riptrack-redump"
+SCRIPT_PATH = (
+    Path(__file__).parent
+    / "src"
+    / "riptrack_redump"
+    / "cli.py"
 )
 
 

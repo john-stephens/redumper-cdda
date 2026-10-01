@@ -445,6 +445,10 @@ must not introduce any sample differences in the established comparison.
 
 ## Coding guidance
 
+The installable package lives under `src/riptrack_redump`. Keep the repository
+`riptrack-redump` launcher thin; the pipx console script and repository launcher
+must both call `riptrack_redump.cli.run` so behavior cannot diverge.
+
 Keep sector arithmetic explicit and auditable. Prefer names such as:
 
 ``` text

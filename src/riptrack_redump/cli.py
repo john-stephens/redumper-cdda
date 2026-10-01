@@ -1,0 +1,3562 @@
+#!/usr/bin/env python3
+
+import argparse
+import io
+import re
+import signal
+import shutil
+import subprocess
+import sys
+import tempfile
+import wave
+from contextlib import redirect_stdout
+from pathlib import Path
+
+
+SECTOR_SIZE = 2352
+ISO_SECTOR_SIZE = 2048
+SECTORS_PER_SECOND = 75
+ACCURATERIP_LEAD_IN_SECTORS = 150
+MMC_TOC_ALLOCATION_LENGTH = 804
+SAMPLE_RATE = 44100
+CHANNELS = 2
+SAMPLE_WIDTH = 2
+
+# One additional physical sector is required at the end so
+# redumper has enough data for drive-offset correction.
+END_PADDING_SECTORS = 1
+
+# Maximum number of refine passes when SCSI/C2 errors remain.
+DEFAULT_REFINE_PASSES = 3
+
+
+class TerminationRequested(Exception):
+    def __init__(self, signum):
+        self.signum = signum
+        self.signal_name = signal.Signals(signum).name
+        super().__init__(self.signal_name)
+
+
+# ----------------------------------------------------------------------
+# Time conversion
+# ----------------------------------------------------------------------
+
+def sectors_to_msf(sectors):
+    minutes, remainder = divmod(
+        sectors,
+        60 * SECTORS_PER_SECOND,
+    )
+
+    seconds, frames = divmod(
+        remainder,
+        SECTORS_PER_SECOND,
+    )
+
+    return f"{minutes:02d}:{seconds:02d}:{frames:02d}"
+
+
+# ----------------------------------------------------------------------
+# Command helpers
+# ----------------------------------------------------------------------
+
+def quote_command(command):
+    return " ".join(
+        subprocess.list2cmdline([str(arg)])
+        for arg in command
+    )
+
+
+def stop_process(process):
+    if process.poll() is not None:
+        return
+
+    try:
+        process.terminate()
+    except ProcessLookupError:
+        return
+
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
+def wait_for_process(process):
+    try:
+        return process.wait()
+    except BaseException:
+        stop_process(process)
+        raise
+
+
+def communicate_with_process(process):
+    try:
+        return process.communicate()
+    except BaseException:
+        stop_process(process)
+
+        for stream in (
+            process.stdout,
+            process.stderr,
+        ):
+            if stream is not None:
+                stream.close()
+
+        raise
+
+
+def track_number_for_lba(tracks, lba):
+    for track in tracks:
+        if (
+            track["begin"]
+            <= lba
+            < track["end"]
+        ):
+            return track["number"]
+
+    if tracks and lba >= tracks[-1]["end"]:
+        return tracks[-1]["number"]
+
+    if tracks and lba < tracks[0]["begin"]:
+        return tracks[0]["number"]
+
+    return None
+
+
+def format_progress_label(
+    progress_label,
+    current_track,
+    progress_tracks,
+):
+    if current_track is not None:
+        current_kind = next(
+            (
+                track.get("kind", "audio")
+                for track in progress_tracks or []
+                if track["number"] == current_track
+            ),
+            "audio",
+        )
+
+        if current_kind == "data":
+            return (
+                f"{progress_label} data track "
+                f"{current_track:02d}"
+            )
+
+        return (
+            f"{progress_label} track "
+            f"{current_track:02d}"
+        )
+
+    if progress_tracks:
+        return f"{progress_label} data"
+
+    return progress_label
+
+
+def run_command_capture(
+    command,
+    verbose=False,
+    progress_label=None,
+    progress_tracks=None,
+):
+    """
+    Run a command while displaying its output live and also
+    retaining the output for later parsing.
+
+    stderr is merged into stdout because redumper may use either
+    stream for status/progress information.
+    """
+
+    if verbose:
+        print()
+        print("+ " + quote_command(command))
+        print()
+    elif progress_label:
+        current_track = (
+            progress_tracks[0]["number"]
+            if progress_tracks
+            else None
+        )
+        display_label = format_progress_label(
+            progress_label,
+            current_track,
+            progress_tracks,
+        )
+        print(
+            f"{display_label}:   0%",
+            end="",
+            flush=True,
+        )
+
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+
+    lines = []
+    last_progress = (
+        0,
+        (
+            progress_tracks[0]["number"]
+            if progress_tracks
+            else None
+        ),
+    )
+
+    assert process.stdout is not None
+
+    try:
+        for line in process.stdout:
+            if verbose:
+                print(line, end="")
+            elif progress_label:
+                percentages = re.findall(
+                    r"\[\s*(\d+)%\]",
+                    line,
+                )
+
+                if percentages:
+                    percent = int(
+                        percentages[-1]
+                    )
+
+                    lba_match = re.search(
+                        r"\bLBA\s*:\s*(-?\d+)",
+                        line,
+                        re.IGNORECASE,
+                    )
+                    current_track = last_progress[1]
+
+                    if lba_match and progress_tracks:
+                        current_track = track_number_for_lba(
+                            progress_tracks,
+                            int(lba_match.group(1)),
+                        )
+
+                    progress = (
+                        percent,
+                        current_track,
+                    )
+
+                    if progress != last_progress:
+                        display_label = format_progress_label(
+                            progress_label,
+                            current_track,
+                            progress_tracks,
+                        )
+                        print(
+                            f"\r{display_label}: "
+                            f"{percent:3d}%",
+                            end="",
+                            flush=True,
+                        )
+                        last_progress = progress
+
+            lines.append(line)
+
+        returncode = wait_for_process(
+            process
+        )
+    except BaseException:
+        stop_process(process)
+        raise
+    finally:
+        process.stdout.close()
+
+        if not verbose and progress_label:
+            print()
+
+    return (
+        returncode,
+        "".join(lines),
+    )
+
+
+def run_command(
+    command,
+    verbose=False,
+    status_label=None,
+):
+    if verbose:
+        print()
+        print("+ " + quote_command(command))
+        print()
+    elif status_label:
+        print(
+            f"{status_label}...",
+            end="",
+            flush=True,
+        )
+
+    process = subprocess.Popen(
+        command,
+        stdout=(
+            None
+            if verbose
+            else subprocess.PIPE
+        ),
+        stderr=(
+            None
+            if verbose
+            else subprocess.STDOUT
+        ),
+        text=not verbose,
+    )
+
+    if verbose:
+        returncode = wait_for_process(
+            process
+        )
+        output = None
+    else:
+        output, _ = communicate_with_process(
+            process
+        )
+        returncode = process.returncode
+
+        if status_label:
+            print(
+                " done"
+                if returncode == 0
+                else " failed"
+            )
+
+    if returncode != 0:
+        raise subprocess.CalledProcessError(
+            returncode,
+            command,
+        )
+
+    return subprocess.CompletedProcess(
+        command,
+        returncode,
+        output,
+    )
+
+
+# ----------------------------------------------------------------------
+# redumper error parsing
+# ----------------------------------------------------------------------
+
+def parse_media_errors(output):
+    """
+    Parse the LAST redumper 'media errors:' block.
+
+    Expected form:
+
+        media errors:
+          SCSI: 0
+          C2: 1
+          Q: 16
+
+    Returns:
+
+        {
+            "SCSI": 0,
+            "C2": 1,
+            "Q": 16,
+        }
+
+    The final block is used because redumper output can contain
+    more than one status/error summary during some operations.
+    """
+
+    pattern = re.compile(
+        r"media errors\s*:\s*"
+        r".*?"
+        r"SCSI\s*:\s*(\d+)"
+        r".*?"
+        r"C2\s*:\s*(\d+)"
+        r".*?"
+        r"Q\s*:\s*(\d+)",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    matches = list(
+        pattern.finditer(output)
+    )
+
+    if not matches:
+        return None
+
+    match = matches[-1]
+
+    return {
+        "SCSI": int(match.group(1)),
+        "C2": int(match.group(2)),
+        "Q": int(match.group(3)),
+    }
+
+
+def print_media_errors(errors):
+    print()
+    print("Media error status")
+    print("------------------")
+    print(f"SCSI: {errors['SCSI']}")
+    print(f"C2:   {errors['C2']}")
+    print(f"Q:    {errors['Q']}")
+
+
+def data_errors_present(errors):
+    """
+    SCSI and C2 errors affect the audio/data samples we are
+    extracting, trigger refinement, and are subject to the
+    configured final error policy.
+
+    Q errors are subchannel-Q errors. They are reported, but are
+    not used as a failure criterion for this audio extraction.
+    """
+
+    return (
+        errors["SCSI"] != 0
+        or errors["C2"] != 0
+    )
+
+
+def should_abort_on_errors(
+    errors,
+    abort_on_skip,
+):
+    return (
+        abort_on_skip
+        and data_errors_present(errors)
+    )
+
+
+# ----------------------------------------------------------------------
+# Disc layout
+# ----------------------------------------------------------------------
+
+def parse_mmc_toc(data):
+    if len(data) < 4:
+        raise RuntimeError(
+            "MMC READ TOC response is shorter than its header."
+        )
+
+    data_length = int.from_bytes(
+        data[0:2],
+        byteorder="big",
+    )
+    response_length = data_length + 2
+
+    if data_length < 10:
+        raise RuntimeError(
+            "MMC READ TOC response contains no track layout."
+        )
+
+    if response_length > len(data):
+        raise RuntimeError(
+            "MMC READ TOC response is truncated."
+        )
+
+    descriptor_data = data[4:response_length]
+
+    if len(descriptor_data) % 8 != 0:
+        raise RuntimeError(
+            "MMC READ TOC response has malformed descriptors."
+        )
+
+    first_track = data[2]
+    last_track = data[3]
+
+    if not (
+        1 <= first_track <= last_track <= 99
+    ):
+        raise RuntimeError(
+            "MMC READ TOC response has an invalid track range."
+        )
+
+    descriptors = {}
+    leadout_lba = None
+
+    for offset in range(
+        0,
+        len(descriptor_data),
+        8,
+    ):
+        descriptor = descriptor_data[
+            offset:offset + 8
+        ]
+        control = descriptor[1] & 0x0F
+        track_number = descriptor[2]
+        start_lba = int.from_bytes(
+            descriptor[4:8],
+            byteorder="big",
+        )
+
+        if track_number == 0xAA:
+            if leadout_lba is not None:
+                raise RuntimeError(
+                    "MMC READ TOC response contains multiple "
+                    "lead-out descriptors."
+                )
+
+            leadout_lba = start_lba
+            continue
+
+        if not (
+            first_track
+            <= track_number
+            <= last_track
+        ):
+            continue
+
+        if track_number in descriptors:
+            raise RuntimeError(
+                "MMC READ TOC response contains duplicate "
+                f"Track {track_number}."
+            )
+
+        descriptors[track_number] = {
+            "control": control,
+            "begin": start_lba,
+        }
+
+    expected_numbers = list(
+        range(first_track, last_track + 1)
+    )
+    missing_numbers = [
+        number
+        for number in expected_numbers
+        if number not in descriptors
+    ]
+
+    if missing_numbers:
+        missing = ", ".join(
+            str(number)
+            for number in missing_numbers
+        )
+        raise RuntimeError(
+            "MMC READ TOC response is missing track "
+            f"descriptor(s): {missing}."
+        )
+
+    if leadout_lba is None:
+        raise RuntimeError(
+            "MMC READ TOC response has no lead-out descriptor."
+        )
+
+    tracks = []
+
+    for index, number in enumerate(
+        expected_numbers
+    ):
+        descriptor = descriptors[number]
+        begin = descriptor["begin"]
+        end = (
+            descriptors[
+                expected_numbers[index + 1]
+            ]["begin"]
+            if index + 1 < len(expected_numbers)
+            else leadout_lba
+        )
+
+        if end <= begin:
+            raise RuntimeError(
+                "MMC READ TOC response has a non-positive "
+                f"length for Track {number}."
+            )
+
+        length = end - begin
+        kind = (
+            "data"
+            if descriptor["control"] & 0x04
+            else "audio"
+        )
+
+        tracks.append(
+            {
+                "number": number,
+                "kind": kind,
+                "control": descriptor["control"],
+                "length": length,
+                "length_msf": sectors_to_msf(length),
+                "begin": begin,
+                "begin_msf": sectors_to_msf(begin),
+                "end": end,
+            }
+        )
+
+    return tracks
+
+
+def read_mmc_toc(device, verbose=False):
+    allocation_msb = (
+        MMC_TOC_ALLOCATION_LENGTH >> 8
+    ) & 0xFF
+    allocation_lsb = (
+        MMC_TOC_ALLOCATION_LENGTH
+        & 0xFF
+    )
+    command = [
+        "sg_raw",
+        "--readonly",
+        "--binary",
+        f"--request={MMC_TOC_ALLOCATION_LENGTH}",
+        device,
+        "43",  # READ TOC/PMA/ATIP
+        "00",  # LBA addresses, TOC format 0
+        "00",
+        "00",
+        "00",
+        "00",  # start track
+        "00",
+        f"{allocation_msb:02x}",
+        f"{allocation_lsb:02x}",
+        "00",
+    ]
+
+    if verbose:
+        print(
+            "Reading complete track layout with MMC READ TOC..."
+        )
+
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    stdout, stderr = communicate_with_process(
+        process
+    )
+
+    if process.returncode != 0:
+        details = stderr.decode(
+            "utf-8",
+            errors="replace",
+        ).strip()
+        raise RuntimeError(
+            "MMC READ TOC failed"
+            + (
+                "\n\n" + details
+                if details
+                else ""
+            )
+        )
+
+    return parse_mmc_toc(
+        stdout
+    )
+
+
+def parse_cdparanoia_toc(text):
+    tracks = []
+
+    pattern = re.compile(
+        r"^\s*"
+        r"(\d+)\.\s+"
+        r"(\d+)\s+"
+        r"\[(\d+:\d+\.\d+)\]\s+"
+        r"(-?\d+)\s+"
+        r"\[(\d+:\d+\.\d+)\]"
+    )
+
+    for raw_line in text.splitlines():
+        match = pattern.match(raw_line)
+
+        if not match:
+            continue
+
+        number = int(match.group(1))
+        length = int(match.group(2))
+        length_msf = match.group(3)
+        begin = int(match.group(4))
+        begin_msf = match.group(5)
+
+        tracks.append(
+            {
+                "number": number,
+                "length": length,
+                "length_msf": length_msf,
+                "begin": begin,
+                "begin_msf": begin_msf,
+                "end": begin + length,
+            }
+        )
+
+    if not tracks:
+        raise RuntimeError(
+            "Could not parse any audio tracks from "
+            "cdparanoia -Q output."
+        )
+
+    return tracks
+
+
+def read_disc_toc(device, verbose=False):
+    command = [
+        "cdparanoia",
+        "-Q",
+        "-d",
+        device,
+    ]
+
+    if verbose:
+        print(
+            "Reading audio track layout with cdparanoia..."
+        )
+
+    process = subprocess.Popen(
+        command,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    stdout, stderr = communicate_with_process(
+        process
+    )
+
+    result = subprocess.CompletedProcess(
+        command,
+        process.returncode,
+        stdout,
+        stderr,
+    )
+
+    if result.returncode != 0:
+        details = "\n".join(
+            part
+            for part in (
+                result.stdout.strip(),
+                result.stderr.strip(),
+            )
+            if part
+        )
+
+        raise RuntimeError(
+            "cdparanoia -Q failed"
+            + (
+                "\n\n" + details
+                if details
+                else ""
+            )
+        )
+
+    output = (
+        (result.stdout or "")
+        + "\n"
+        + (result.stderr or "")
+    )
+
+    return parse_cdparanoia_toc(
+        output
+    )
+
+
+def reconcile_disc_layout(
+    mmc_tracks,
+    cdparanoia_tracks,
+):
+    cdparanoia_by_number = {
+        track["number"]: track
+        for track in cdparanoia_tracks
+    }
+    mmc_audio_numbers = {
+        track["number"]
+        for track in mmc_tracks
+        if track["kind"] == "audio"
+    }
+    cdparanoia_numbers = set(
+        cdparanoia_by_number
+    )
+
+    if mmc_audio_numbers != cdparanoia_numbers:
+        raise RuntimeError(
+            "MMC and cdparanoia disagree about which tracks "
+            "are audio "
+            f"(MMC: {sorted(mmc_audio_numbers)}, "
+            f"cdparanoia: {sorted(cdparanoia_numbers)})."
+        )
+
+    reconciled = []
+
+    for mmc_track in mmc_tracks:
+        track = dict(mmc_track)
+
+        if track["kind"] == "audio":
+            cdparanoia_track = (
+                cdparanoia_by_number[
+                    track["number"]
+                ]
+            )
+            differing_fields = [
+                field
+                for field in (
+                    "begin",
+                    "end",
+                    "length",
+                )
+                if track[field]
+                != cdparanoia_track[field]
+            ]
+
+            if differing_fields:
+                values = ", ".join(
+                    f"{field}: MMC={track[field]}, "
+                    f"cdparanoia={cdparanoia_track[field]}"
+                    for field in differing_fields
+                )
+                raise RuntimeError(
+                    "MMC and cdparanoia boundaries disagree "
+                    f"for audio Track {track['number']} "
+                    f"({values})."
+                )
+
+            # Preserve cdparanoia's established display values and
+            # keep its sector boundaries authoritative during this
+            # validation stage.
+            track.update(
+                cdparanoia_track
+            )
+            track["kind"] = "audio"
+            track["control"] = (
+                mmc_track["control"]
+            )
+
+        reconciled.append(track)
+
+    return reconciled
+
+
+def read_disc_layout(device, verbose=False):
+    mmc_tracks = read_mmc_toc(
+        device,
+        verbose=verbose,
+    )
+
+    if not any(
+        track["kind"] == "audio"
+        for track in mmc_tracks
+    ):
+        return mmc_tracks
+
+    cdparanoia_tracks = read_disc_toc(
+        device,
+        verbose=verbose,
+    )
+
+    return reconcile_disc_layout(
+        mmc_tracks,
+        cdparanoia_tracks,
+    )
+
+
+def find_track(tracks, number):
+    for track in tracks:
+        if track["number"] == number:
+            return track
+
+    available = ", ".join(
+        str(track["number"])
+        for track in tracks
+    )
+
+    raise RuntimeError(
+        f"Audio track {number} was not found.\n"
+        f"Available audio tracks: {available}"
+    )
+
+
+def find_disc_track(tracks, number):
+    for track in tracks:
+        if track["number"] == number:
+            return track
+
+    available = ", ".join(
+        str(track["number"])
+        for track in tracks
+    )
+
+    raise RuntimeError(
+        f"Track {number} was not found.\n"
+        f"Available tracks: {available}"
+    )
+
+
+def find_requested_track(tracks, number):
+    if number != 0:
+        return find_track(
+            tracks,
+            number,
+        )
+
+    track_one = find_track(
+        tracks,
+        1,
+    )
+
+    if track_one.get("kind", "audio") != "audio":
+        raise RuntimeError(
+            "Track 0 is only supported when Track 1 is audio."
+        )
+
+    length = track_one["begin"]
+
+    if length <= 0:
+        raise RuntimeError(
+            "Track 0 does not exist: Track 1 starts at LBA 0."
+        )
+
+    return {
+        "number": 0,
+        "kind": "audio",
+        "length": length,
+        "length_msf": sectors_to_msf(length),
+        "begin": 0,
+        "begin_msf": "00:00.00",
+        "end": track_one["begin"],
+    }
+
+
+def parse_track_selection(value):
+    if value == "-":
+        return {
+            "start": None,
+            "end": None,
+        }
+
+    if re.fullmatch(r"\d+", value):
+        number = int(value)
+        return {
+            "start": number,
+            "end": number,
+        }
+
+    match = re.fullmatch(
+        r"(\d*)-(\d*)",
+        value,
+    )
+
+    if not match:
+        raise argparse.ArgumentTypeError(
+            "track must be N, N-M, -M, N-, or -"
+        )
+
+    return {
+        "start": (
+            int(match.group(1))
+            if match.group(1)
+            else None
+        ),
+        "end": (
+            int(match.group(2))
+            if match.group(2)
+            else None
+        ),
+    }
+
+
+def resolve_track_selection(
+    tracks,
+    selection,
+):
+    regular_numbers = [
+        track["number"]
+        for track in tracks
+    ]
+
+    if not regular_numbers:
+        raise RuntimeError(
+            "No audio tracks are available."
+        )
+
+    explicit_start = selection["start"]
+    explicit_end = selection["end"]
+    start = explicit_start
+    end = explicit_end
+
+    if start is None:
+        start = 1
+
+    if end is None:
+        end = max(regular_numbers)
+
+    if start > end:
+        raise RuntimeError(
+            f"Invalid track range {start}-{end}."
+        )
+
+    if (
+        explicit_start is not None
+        and explicit_end is not None
+    ):
+        selected = [
+            find_requested_track(
+                tracks,
+                number,
+            )
+            for number in range(start, end + 1)
+        ]
+    else:
+        explicit_number = (
+            explicit_start
+            if explicit_start is not None
+            else explicit_end
+        )
+
+        if explicit_number is not None:
+            find_requested_track(
+                tracks,
+                explicit_number,
+            )
+
+        selected = [
+            track
+            for track in tracks
+            if start <= track["number"] <= end
+        ]
+
+        if start == 0:
+            selected.insert(
+                0,
+                find_requested_track(
+                    tracks,
+                    0,
+                ),
+            )
+
+    return selected
+
+
+def resolve_disc_selection(
+    disc_tracks,
+    selection,
+    include_data=False,
+):
+    if not include_data:
+        audio_tracks = [
+            track
+            for track in disc_tracks
+            if track.get("kind", "audio") == "audio"
+        ]
+        return resolve_track_selection(
+            audio_tracks,
+            selection,
+        )
+
+    regular_numbers = [
+        track["number"]
+        for track in disc_tracks
+    ]
+
+    if not regular_numbers:
+        raise RuntimeError(
+            "No tracks are available."
+        )
+
+    explicit_start = selection["start"]
+    explicit_end = selection["end"]
+    start = (
+        1
+        if explicit_start is None
+        else explicit_start
+    )
+    end = (
+        max(regular_numbers)
+        if explicit_end is None
+        else explicit_end
+    )
+
+    if start > end:
+        raise RuntimeError(
+            f"Invalid track range {start}-{end}."
+        )
+
+    selected = []
+
+    for number in range(start, end + 1):
+        if number == 0:
+            selected.append(
+                find_requested_track(
+                    disc_tracks,
+                    0,
+                )
+            )
+            continue
+
+        selected.append(
+            find_disc_track(
+                disc_tracks,
+                number,
+            )
+        )
+
+    return selected
+
+
+def format_track_numbers(selected_tracks):
+    first = selected_tracks[0]["number"]
+    last = selected_tracks[-1]["number"]
+
+    if first == last:
+        return f"{first:02d}"
+
+    return f"{first:02d}-{last:02d}"
+
+
+def validate_data_output_mode(
+    selected_tracks,
+    include_data,
+    single_file,
+):
+    if (
+        include_data
+        and single_file
+        and (
+            len(selected_tracks) != 1
+            or selected_tracks[0].get(
+                "kind",
+                "audio",
+            ) != "data"
+        )
+    ):
+        raise RuntimeError(
+            "With --single-file, --include-data requires one "
+            "explicit data track."
+        )
+
+
+# ----------------------------------------------------------------------
+# AccurateRip verification
+# ----------------------------------------------------------------------
+
+def load_accuraterip_library():
+    try:
+        from arver.audio.checksums import get_checksums
+        from arver.disc.database import AccurateRipFetcher
+        from arver.disc.fingerprint import (
+            accuraterip_ids,
+            freedb_id,
+        )
+    except (ImportError, OSError) as exc:
+        raise RuntimeError(
+            "AccurateRip verification requires the ARver Python "
+            "package. Install it with: python3 -m pip install arver"
+        ) from exc
+
+    return {
+        "get_checksums": get_checksums,
+        "fetcher": AccurateRipFetcher,
+        "accuraterip_ids": accuraterip_ids,
+        "freedb_id": freedb_id,
+    }
+
+
+def accuraterip_layout_type(disc_tracks):
+    kinds = [
+        track.get("kind", "audio")
+        for track in disc_tracks
+    ]
+
+    if not kinds or "audio" not in kinds:
+        raise RuntimeError(
+            "AccurateRip verification requires at least one audio track."
+        )
+
+    if all(kind == "audio" for kind in kinds):
+        return "audio"
+
+    if (
+        kinds[0] == "data"
+        and all(kind == "audio" for kind in kinds[1:])
+    ):
+        return "mixed-mode"
+
+    if (
+        kinds[-1] == "data"
+        and all(kind == "audio" for kind in kinds[:-1])
+    ):
+        return "enhanced"
+
+    raise RuntimeError(
+        "AccurateRip verification does not support this audio/data "
+        "track arrangement."
+    )
+
+
+def build_accuraterip_disc_id(
+    disc_tracks,
+    library=None,
+):
+    if library is None:
+        library = load_accuraterip_library()
+
+    accuraterip_layout_type(
+        disc_tracks
+    )
+    audio_tracks = [
+        track
+        for track in disc_tracks
+        if track.get("kind", "audio") == "audio"
+    ]
+    all_offsets = [
+        track["begin"] + ACCURATERIP_LEAD_IN_SECTORS
+        for track in disc_tracks
+    ]
+    audio_offsets = [
+        track["begin"] + ACCURATERIP_LEAD_IN_SECTORS
+        for track in audio_tracks
+    ]
+    lead_out = (
+        disc_tracks[-1]["end"]
+        + ACCURATERIP_LEAD_IN_SECTORS
+    )
+    ar_id1, ar_id2 = library[
+        "accuraterip_ids"
+    ](
+        audio_offsets,
+        lead_out,
+    )
+    cddb_id = library["freedb_id"](
+        all_offsets,
+        lead_out,
+    )
+
+    return (
+        f"{len(audio_tracks):03d}-"
+        f"{ar_id1}-{ar_id2}-{cddb_id}"
+    )
+
+
+def match_accuraterip_checksums(
+    arv1,
+    arv2,
+    candidates,
+):
+    for version, checksum in (
+        ("ARv2", arv2),
+        ("ARv1", arv1),
+    ):
+        if checksum in candidates:
+            match = candidates[checksum]
+            return {
+                "status": "verified",
+                "version": version,
+                "checksum": checksum,
+                "confidence": match["confidence"],
+                "response": match["response"],
+            }
+
+    return {
+        "status": (
+            "no-match"
+            if candidates
+            else "not-present"
+        ),
+        "arv1": arv1,
+        "arv2": arv2,
+    }
+
+
+def verify_with_accuraterip(
+    disc_tracks,
+    verification_tracks,
+    workdir,
+    library=None,
+):
+    if library is None:
+        library = load_accuraterip_library()
+
+    layout_type = accuraterip_layout_type(
+        disc_tracks
+    )
+    audio_tracks = [
+        track
+        for track in disc_tracks
+        if track.get("kind", "audio") == "audio"
+    ]
+    audio_indexes = {
+        track["number"]: index
+        for index, track in enumerate(
+            audio_tracks,
+            start=1,
+        )
+    }
+    requested = [
+        item
+        for item in verification_tracks
+        if item["track"]["number"] != 0
+    ]
+
+    if not requested:
+        raise RuntimeError(
+            "The selection contains no AccurateRip-verifiable "
+            "audio tracks; Track 0 and data tracks are not tracked."
+        )
+
+    disc_id = build_accuraterip_disc_id(
+        disc_tracks,
+        library=library,
+    )
+    fetch_output = io.StringIO()
+
+    try:
+        with redirect_stdout(fetch_output):
+            database_disc = library[
+                "fetcher"
+            ].from_id(disc_id).fetch()
+    except Exception as exc:
+        raise RuntimeError(
+            f"ARver database lookup failed: {exc}"
+        ) from exc
+
+    if database_disc is None:
+        detail = fetch_output.getvalue().strip()
+        raise RuntimeError(
+            detail
+            or "The disc was not found in the AccurateRip database."
+        )
+
+    try:
+        database_tracks = database_disc.make_dict()
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"ARver returned unusable database data: {exc}"
+        ) from exc
+    results = []
+
+    for item in requested:
+        track = item["track"]
+        audio_index = audio_indexes[
+            track["number"]
+        ]
+        wav_path = (
+            workdir
+            / f"accuraterip-track{track['number']:02d}.wav"
+        )
+
+        segments_to_wav(
+            item["segments"],
+            wav_path,
+            track["length"],
+        )
+
+        try:
+            checksums = library[
+                "get_checksums"
+            ](
+                str(wav_path),
+                audio_index,
+                len(audio_tracks),
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Could not checksum Track {track['number']:02d}: {exc}"
+            ) from exc
+
+        database_index = (
+            track["number"]
+            if layout_type == "mixed-mode"
+            else audio_index
+        )
+        candidates = database_tracks.get(
+            database_index,
+            {},
+        )
+        result = match_accuraterip_checksums(
+            checksums.arv1,
+            checksums.arv2,
+            candidates,
+        )
+        result["track"] = track["number"]
+        results.append(result)
+
+    return {
+        "disc_id": disc_id,
+        "results": results,
+    }
+
+
+def print_accuraterip_report(report, verbose=False):
+    print()
+    print("AccurateRip verification")
+    print("========================")
+    print(f"Disc ID: {report['disc_id']}")
+    print()
+
+    verified = 0
+
+    for result in report["results"]:
+        track_label = f"Track {result['track']:02d}"
+
+        if result["status"] == "verified":
+            verified += 1
+            response = (
+                f", response {result['response']}"
+                if verbose
+                else ""
+            )
+            print(
+                f"{track_label}: verified "
+                f"({result['version']} "
+                f"{result['checksum']:08x}, "
+                f"confidence {result['confidence']}"
+                f"{response})"
+            )
+        elif result["status"] == "not-present":
+            print(
+                f"{track_label}: not present in the database "
+                f"(ARv1 {result['arv1']:08x}, "
+                f"ARv2 {result['arv2']:08x})"
+            )
+        else:
+            print(
+                f"{track_label}: no match "
+                f"(ARv1 {result['arv1']:08x}, "
+                f"ARv2 {result['arv2']:08x})"
+            )
+
+    total = len(report["results"])
+    print()
+    print(
+        f"Verified: {verified}/{total} selected audio "
+        f"track{'' if total == 1 else 's'}"
+    )
+
+
+def build_output_jobs(
+    selected_tracks,
+    single_file,
+    output=None,
+    output_directory=None,
+    prefix="track",
+):
+    directory = (
+        Path.cwd()
+        if output_directory is None
+        else Path(output_directory)
+    )
+
+    if not single_file:
+        return [
+            {
+                "track": track,
+                "kind": track.get("kind", "audio"),
+                "component_tracks": (
+                    [track]
+                    if track.get("kind", "audio") == "audio"
+                    else []
+                ),
+                "expected_sectors": track["length"],
+                "output_path": (
+                    directory
+                    / (
+                        f"{prefix}{track['number']:02d}.iso"
+                        if track.get("kind", "audio") == "data"
+                        else f"{prefix}{track['number']:02d}.wav"
+                    )
+                ).resolve(),
+            }
+            for track in selected_tracks
+        ]
+
+    first_track = selected_tracks[0]
+
+    if (
+        len(selected_tracks) > 1
+        and any(
+            track.get("kind", "audio") == "data"
+            for track in selected_tracks
+        )
+    ):
+        raise RuntimeError(
+            "Data tracks can only be combined with other "
+            "tracks as separate files."
+        )
+
+    if first_track.get("kind", "audio") == "data":
+        output_path = (
+            Path(output).expanduser().resolve()
+            if output is not None
+            else (
+                directory
+                / f"{prefix}{first_track['number']:02d}.iso"
+            ).resolve()
+        )
+        return [
+            {
+                "track": first_track,
+                "kind": "data",
+                "component_tracks": [],
+                "expected_sectors": first_track["length"],
+                "output_path": output_path,
+            }
+        ]
+
+    output_sectors = sum(
+        track["length"]
+        for track in selected_tracks
+    )
+    wav_path = (
+        Path(output).expanduser().resolve()
+        if output is not None
+        else (
+            directory
+            / (
+                f"{prefix}{first_track['number']:02d}.wav"
+                if len(selected_tracks) == 1
+                else f"{prefix}.wav"
+            )
+        ).resolve()
+    )
+
+    return [
+        {
+            "track": None,
+            "kind": "audio",
+            "component_tracks": selected_tracks,
+            "expected_sectors": output_sectors,
+            "output_path": wav_path,
+        }
+    ]
+
+
+def print_disc_layout(tracks):
+    print()
+    print("Disc track layout")
+    print("-----------------")
+
+    print(
+        f"{'Track':>5}  "
+        f"{'Type':<5}  "
+        f"{'Length':>10}  "
+        f"{'Begin':>10}  "
+        f"{'End':>10}"
+    )
+
+    for track in tracks:
+        print(
+            f"{track['number']:>5}  "
+            f"{track.get('kind', 'audio'):<5}  "
+            f"{track['length']:>10}  "
+            f"{track['begin']:>10}  "
+            f"{track['end']:>10}"
+        )
+
+
+def print_selected_track(track):
+    print()
+    print("Selected track")
+    print("--------------")
+
+    print(
+        f"Track:               "
+        f"{track['number']:02d}"
+    )
+    print(
+        f"Type:                "
+        f"{track.get('kind', 'audio')}"
+    )
+
+    print(
+        f"Begin LBA:           "
+        f"{track['begin']}"
+    )
+
+    print(
+        f"Length:              "
+        f"{track['length']:,} sectors"
+    )
+
+    print(
+        f"Length (MSF):        "
+        f"{track['length_msf']}"
+    )
+
+    print(
+        f"Logical end LBA:     "
+        f"{track['end']} [exclusive]"
+    )
+
+    print(
+        f"Calculated duration: "
+        f"{sectors_to_msf(track['length'])}"
+    )
+
+
+# ----------------------------------------------------------------------
+# Generated-file tracking
+# ----------------------------------------------------------------------
+
+def snapshot_files(directory):
+    result = {}
+
+    if not directory.exists():
+        return result
+
+    for path in directory.iterdir():
+        if not path.is_file():
+            continue
+
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+
+        result[path.resolve()] = (
+            stat.st_size,
+            stat.st_mtime_ns,
+        )
+
+    return result
+
+
+def changed_files(directory, before):
+    result = []
+
+    if not directory.exists():
+        return result
+
+    for path in directory.iterdir():
+        if not path.is_file():
+            continue
+
+        resolved = path.resolve()
+
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+
+        current = (
+            stat.st_size,
+            stat.st_mtime_ns,
+        )
+
+        if (
+            resolved not in before
+            or before[resolved] != current
+        ):
+            result.append(path)
+
+    return result
+
+
+# ----------------------------------------------------------------------
+# CUE helpers
+# ----------------------------------------------------------------------
+
+def msf_to_sectors(
+    minutes,
+    seconds,
+    frames,
+):
+    return (
+        minutes
+        * 60
+        * SECTORS_PER_SECOND
+        + seconds
+        * SECTORS_PER_SECOND
+        + frames
+    )
+
+
+def read_text_file(path):
+    try:
+        return path.read_text(
+            encoding="utf-8-sig",
+            errors="strict",
+        )
+
+    except UnicodeDecodeError:
+        return path.read_text(
+            encoding="cp1252",
+            errors="strict",
+        )
+
+
+def parse_generated_cue(cue_path):
+    text = read_text_file(
+        cue_path
+    )
+
+    tracks = []
+
+    current_file = None
+    current_track = None
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+
+        if not line:
+            continue
+
+        match = re.match(
+            r'^FILE\s+"([^"]+)"\s+(\S+)',
+            line,
+            re.IGNORECASE,
+        )
+
+        if match:
+            current_file = match.group(1)
+            continue
+
+        match = re.match(
+            r"^TRACK\s+(\d+)\s+(\S+)",
+            line,
+            re.IGNORECASE,
+        )
+
+        if match:
+            current_track = {
+                "number": int(
+                    match.group(1)
+                ),
+                "type": (
+                    match.group(2).upper()
+                ),
+                "file": current_file,
+                "indexes": {},
+            }
+
+            tracks.append(
+                current_track
+            )
+
+            continue
+
+        if current_track is None:
+            continue
+
+        match = re.match(
+            r"^INDEX\s+(\d+)\s+"
+            r"(\d+):(\d+):(\d+)",
+            line,
+            re.IGNORECASE,
+        )
+
+        if match:
+            index_number = int(
+                match.group(1)
+            )
+
+            current_track["indexes"][
+                index_number
+            ] = msf_to_sectors(
+                int(match.group(2)),
+                int(match.group(3)),
+                int(match.group(4)),
+            )
+
+    return tracks
+
+
+def find_generated_cues(
+    workdir,
+    image_name,
+    changed,
+):
+    changed_cues = [
+        path
+        for path in changed
+        if path.suffix.lower() == ".cue"
+    ]
+
+    if changed_cues:
+        return sorted(
+            changed_cues,
+            key=lambda path: (
+                path.stat().st_mtime_ns
+            ),
+            reverse=True,
+        )
+
+    candidates = [
+        path
+        for path in workdir.glob("*.cue")
+        if (
+            image_name.lower()
+            in path.name.lower()
+        )
+    ]
+
+    return sorted(
+        candidates,
+        key=lambda path: (
+            path.stat().st_mtime_ns
+        ),
+        reverse=True,
+    )
+
+
+def valid_audio_bin(path):
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return False
+
+    return (
+        size > 0
+        and size % SECTOR_SIZE == 0
+    )
+
+
+def bin_sector_count(path):
+    return (
+        path.stat().st_size
+        // SECTOR_SIZE
+    )
+
+
+# ----------------------------------------------------------------------
+# Determine exact CDDA segments
+# ----------------------------------------------------------------------
+
+def get_index01_offset(cue_track):
+    indexes = cue_track["indexes"]
+
+    if 1 not in indexes:
+        raise RuntimeError(
+            f"Track {cue_track['number']:02d} "
+            "has no INDEX 01 in the generated CUE."
+        )
+
+    return indexes[1]
+
+
+def identify_generated_audio_segments(
+    workdir,
+    image_name,
+    changed,
+    requested_track,
+    expected_sectors,
+    track_zero_sectors=None,
+):
+    generated_cues = find_generated_cues(
+        workdir,
+        image_name,
+        changed,
+    )
+
+    if not generated_cues:
+        raise RuntimeError(
+            "Could not find redumper's generated CUE."
+        )
+
+    errors = []
+
+    for cue_path in generated_cues:
+
+        try:
+            cue_tracks = parse_generated_cue(
+                cue_path
+            )
+
+        except Exception as exc:
+            errors.append(
+                f"{cue_path}: {exc}"
+            )
+            continue
+
+        start_index = None
+        cue_track_number = (
+            1
+            if requested_track == 0
+            else requested_track
+        )
+
+        for index, cue_track in enumerate(
+            cue_tracks
+        ):
+            if (
+                cue_track["number"]
+                == cue_track_number
+                and cue_track["type"]
+                == "AUDIO"
+            ):
+                start_index = index
+                break
+
+        if start_index is None:
+            errors.append(
+                f"{cue_path}: "
+                f"Track {cue_track_number:02d} "
+                "not found as AUDIO"
+            )
+            continue
+
+        selected_track = (
+            cue_tracks[start_index]
+        )
+
+        try:
+            selected_start_sector = (
+                get_index01_offset(
+                    selected_track
+                )
+            )
+
+        except Exception as exc:
+            errors.append(
+                f"{cue_path}: {exc}"
+            )
+            continue
+
+        if (
+            requested_track == 0
+            and selected_start_sector
+            != (
+                track_zero_sectors
+                if track_zero_sectors is not None
+                else expected_sectors
+            )
+        ):
+            expected_index01 = (
+                track_zero_sectors
+                if track_zero_sectors is not None
+                else expected_sectors
+            )
+            errors.append(
+                f"{cue_path}: Track 1 INDEX 01 is at "
+                f"sector {selected_start_sector:,}, expected "
+                f"{expected_index01:,} from cdparanoia"
+            )
+            continue
+
+        segments = []
+        remaining = expected_sectors
+
+        for relative_index, cue_track in enumerate(
+            cue_tracks[start_index:]
+        ):
+
+            if cue_track["type"] != "AUDIO":
+                break
+
+            file_name = cue_track["file"]
+
+            if not file_name:
+                break
+
+            path = (
+                cue_path.parent
+                / file_name
+            )
+
+            if not valid_audio_bin(path):
+                break
+
+            total_available = (
+                bin_sector_count(path)
+            )
+
+            if (
+                requested_track == 0
+                and relative_index > 0
+            ):
+                break
+
+            if requested_track == 0:
+                start_sector = 0
+            elif relative_index == 0:
+                start_sector = (
+                    selected_start_sector
+                )
+            else:
+                start_sector = 0
+
+            if start_sector > total_available:
+                break
+
+            available = (
+                total_available
+                - start_sector
+            )
+
+            take = min(
+                available,
+                remaining,
+            )
+
+            if take > 0:
+                segments.append(
+                    {
+                        "path": path,
+                        "track": (
+                            cue_track["number"]
+                        ),
+                        "start_sector": (
+                            start_sector
+                        ),
+                        "sectors": take,
+                        "bin_sectors": (
+                            total_available
+                        ),
+                    }
+                )
+
+                remaining -= take
+
+            if remaining == 0:
+                return (
+                    segments,
+                    cue_path,
+                    (
+                        0
+                        if requested_track == 0
+                        else selected_start_sector
+                    ),
+                )
+
+        errors.append(
+            f"{cue_path}: "
+            f"{remaining:,} additional sectors required"
+        )
+
+    raise RuntimeError(
+        "Could not identify enough split AUDIO data "
+        "for the requested range.\n"
+        + "\n".join(errors)
+    )
+
+
+# ----------------------------------------------------------------------
+# Determine and convert data tracks
+# ----------------------------------------------------------------------
+
+def data_track_sector_size(track_type):
+    sizes = {
+        "MODE1/2352": SECTOR_SIZE,
+        "MODE2/2352": SECTOR_SIZE,
+        "MODE1/2048": ISO_SECTOR_SIZE,
+    }
+
+    if track_type not in sizes:
+        raise RuntimeError(
+            f"Unsupported data-track mode {track_type}."
+        )
+
+    return sizes[track_type]
+
+
+def identify_generated_data_track(
+    workdir,
+    image_name,
+    changed,
+    requested_track,
+):
+    generated_cues = find_generated_cues(
+        workdir,
+        image_name,
+        changed,
+    )
+
+    if not generated_cues:
+        raise RuntimeError(
+            "Could not find redumper's generated CUE."
+        )
+
+    errors = []
+
+    for cue_path in generated_cues:
+        try:
+            cue_tracks = parse_generated_cue(
+                cue_path
+            )
+            selected_track = next(
+                (
+                    track
+                    for track in cue_tracks
+                    if track["number"] == requested_track
+                ),
+                None,
+            )
+
+            if selected_track is None:
+                raise RuntimeError(
+                    f"Track {requested_track:02d} was not found"
+                )
+
+            if selected_track["type"] == "AUDIO":
+                raise RuntimeError(
+                    f"Track {requested_track:02d} is AUDIO, "
+                    "not data"
+                )
+
+            sector_size = data_track_sector_size(
+                selected_track["type"]
+            )
+            start_sector = get_index01_offset(
+                selected_track
+            )
+            file_name = selected_track["file"]
+
+            if not file_name:
+                raise RuntimeError(
+                    f"Track {requested_track:02d} has no BIN file"
+                )
+
+            shared_tracks = [
+                track["number"]
+                for track in cue_tracks
+                if (
+                    track is not selected_track
+                    and track["file"] == file_name
+                )
+            ]
+
+            if shared_tracks:
+                raise RuntimeError(
+                    f"Track {requested_track:02d} shares its BIN "
+                    "with another track"
+                )
+
+            path = cue_path.parent / file_name
+
+            try:
+                file_size = path.stat().st_size
+            except OSError as exc:
+                raise RuntimeError(
+                    f"Could not read data BIN {path}: {exc}"
+                ) from exc
+
+            if (
+                file_size <= 0
+                or file_size % sector_size != 0
+            ):
+                raise RuntimeError(
+                    f"Data BIN {path} has an invalid size"
+                )
+
+            total_sectors = file_size // sector_size
+
+            if start_sector >= total_sectors:
+                raise RuntimeError(
+                    f"Track {requested_track:02d} INDEX 01 lies "
+                    "outside its BIN"
+                )
+
+            return {
+                "cue_path": cue_path,
+                "path": path,
+                "track": requested_track,
+                "track_type": selected_track["type"],
+                "sector_size": sector_size,
+                "start_sector": start_sector,
+                "sectors": total_sectors - start_sector,
+            }
+
+        except Exception as exc:
+            errors.append(
+                f"{cue_path}: {exc}"
+            )
+
+    raise RuntimeError(
+        "Could not identify split data for the requested track.\n"
+        + "\n".join(errors)
+    )
+
+
+def extract_iso_payload(raw_sector, track_type):
+    if track_type == "MODE1/2048":
+        if len(raw_sector) != ISO_SECTOR_SIZE:
+            raise RuntimeError(
+                "Short MODE1/2048 sector."
+            )
+        return raw_sector
+
+    if len(raw_sector) != SECTOR_SIZE:
+        raise RuntimeError(
+            f"Short {track_type} sector."
+        )
+
+    expected_sync = (
+        b"\x00"
+        + b"\xff" * 10
+        + b"\x00"
+    )
+
+    if raw_sector[:12] != expected_sync:
+        raise RuntimeError(
+            f"Invalid sync pattern in {track_type} sector."
+        )
+
+    if track_type == "MODE1/2352":
+        if raw_sector[15] != 1:
+            raise RuntimeError(
+                "MODE1/2352 sector has the wrong mode byte."
+            )
+        return raw_sector[16:16 + ISO_SECTOR_SIZE]
+
+    if track_type == "MODE2/2352":
+        if raw_sector[15] != 2:
+            raise RuntimeError(
+                "MODE2/2352 sector has the wrong mode byte."
+            )
+
+        if raw_sector[16:20] != raw_sector[20:24]:
+            raise RuntimeError(
+                "MODE2/2352 sector has mismatched subheaders."
+            )
+
+        if raw_sector[18] & 0x20:
+            raise RuntimeError(
+                "MODE2 Form 2 sectors cannot be represented in "
+                "a 2048-byte-sector ISO."
+            )
+
+        return raw_sector[24:24 + ISO_SECTOR_SIZE]
+
+    raise RuntimeError(
+        f"Unsupported data-track mode {track_type}."
+    )
+
+
+def read_iso9660_volume_size(iso_path, total_sectors):
+    if total_sectors <= 16:
+        raise RuntimeError(
+            "Converted data track is too short for ISO9660."
+        )
+
+    with iso_path.open("rb") as iso_file:
+        primary = None
+
+        for sector_number in range(
+            16,
+            min(total_sectors, 256),
+        ):
+            iso_file.seek(
+                sector_number * ISO_SECTOR_SIZE
+            )
+            descriptor = iso_file.read(
+                ISO_SECTOR_SIZE
+            )
+
+            if len(descriptor) != ISO_SECTOR_SIZE:
+                raise RuntimeError(
+                    "Short ISO9660 volume descriptor."
+                )
+
+            if (
+                descriptor[1:6] != b"CD001"
+                or descriptor[6] != 1
+            ):
+                raise RuntimeError(
+                    "Converted data track has an invalid "
+                    "ISO9660 volume descriptor."
+                )
+
+            descriptor_type = descriptor[0]
+
+            if descriptor_type == 1:
+                primary = descriptor
+                break
+
+            if descriptor_type == 255:
+                break
+
+    if primary is None:
+        raise RuntimeError(
+            "Converted data track has no ISO9660 primary "
+            "volume descriptor."
+        )
+
+    volume_sectors_le = int.from_bytes(
+        primary[80:84],
+        byteorder="little",
+    )
+    volume_sectors_be = int.from_bytes(
+        primary[84:88],
+        byteorder="big",
+    )
+    block_size_le = int.from_bytes(
+        primary[128:130],
+        byteorder="little",
+    )
+    block_size_be = int.from_bytes(
+        primary[130:132],
+        byteorder="big",
+    )
+
+    if (
+        volume_sectors_le == 0
+        or volume_sectors_le != volume_sectors_be
+    ):
+        raise RuntimeError(
+            "ISO9660 volume-space size is invalid."
+        )
+
+    if (
+        block_size_le != ISO_SECTOR_SIZE
+        or block_size_be != ISO_SECTOR_SIZE
+    ):
+        raise RuntimeError(
+            "ISO9660 logical block size is not 2048 bytes."
+        )
+
+    if volume_sectors_le > total_sectors:
+        raise RuntimeError(
+            "ISO9660 volume requires more sectors than the "
+            "split data track provides."
+        )
+
+    root_record = primary[156:190]
+
+    if (
+        root_record[0] < 34
+        or not (root_record[25] & 0x02)
+    ):
+        raise RuntimeError(
+            "ISO9660 root directory record is invalid."
+        )
+
+    root_extent_le = int.from_bytes(
+        root_record[2:6],
+        byteorder="little",
+    )
+    root_extent_be = int.from_bytes(
+        root_record[6:10],
+        byteorder="big",
+    )
+    root_size_le = int.from_bytes(
+        root_record[10:14],
+        byteorder="little",
+    )
+    root_size_be = int.from_bytes(
+        root_record[14:18],
+        byteorder="big",
+    )
+
+    if (
+        root_extent_le != root_extent_be
+        or root_size_le == 0
+        or root_size_le != root_size_be
+    ):
+        raise RuntimeError(
+            "ISO9660 root directory extent is invalid."
+        )
+
+    root_sectors = (
+        root_size_le
+        + ISO_SECTOR_SIZE
+        - 1
+    ) // ISO_SECTOR_SIZE
+
+    if (
+        root_extent_le + root_sectors
+        > volume_sectors_le
+    ):
+        raise RuntimeError(
+            "ISO9660 root directory lies outside the volume."
+        )
+
+    return volume_sectors_le
+
+
+def data_track_to_iso(
+    data_track,
+    iso_path,
+    verbose=False,
+):
+    iso_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    track_type = data_track["track_type"]
+    raw_sector_size = data_track["sector_size"]
+    converted_sectors = 0
+
+    with (
+        data_track["path"].open("rb") as source,
+        iso_path.open("wb") as destination,
+    ):
+        source.seek(
+            data_track["start_sector"]
+            * raw_sector_size
+        )
+
+        for sector_index in range(
+            data_track["sectors"]
+        ):
+            raw_sector = source.read(
+                raw_sector_size
+            )
+
+            if len(raw_sector) != raw_sector_size:
+                raise RuntimeError(
+                    "Unexpected end of data BIN at sector "
+                    f"{sector_index:,}."
+                )
+
+            destination.write(
+                extract_iso_payload(
+                    raw_sector,
+                    track_type,
+                )
+            )
+            converted_sectors += 1
+
+    volume_sectors = read_iso9660_volume_size(
+        iso_path,
+        converted_sectors,
+    )
+
+    with iso_path.open("r+b") as destination:
+        destination.truncate(
+            volume_sectors * ISO_SECTOR_SIZE
+        )
+
+    if verbose:
+        print()
+        print("ISO conversion")
+        print("--------------")
+        print(
+            f"Track:               "
+            f"{data_track['track']:02d}"
+        )
+        print(
+            f"Mode:                {track_type}"
+        )
+        print(
+            f"BIN:                 {data_track['path']}"
+        )
+        print(
+            f"INDEX 01 offset:     "
+            f"{data_track['start_sector']:,} sectors"
+        )
+        print(
+            f"ISO9660 sectors:     {volume_sectors:,}"
+        )
+        print(
+            f"Temporary ISO:       {iso_path}"
+        )
+
+
+# ----------------------------------------------------------------------
+# CDDA -> WAV
+# ----------------------------------------------------------------------
+
+def segments_to_wav(
+    segments,
+    wav_path,
+    expected_sectors,
+    verbose=False,
+):
+    total_sectors = sum(
+        segment["sectors"]
+        for segment in segments
+    )
+
+    if total_sectors != expected_sectors:
+        raise RuntimeError(
+            "Selected CDDA segments do not match "
+            "the requested sector count."
+        )
+
+    if verbose:
+        print()
+        print("WAV conversion")
+        print("--------------")
+
+        for index, segment in enumerate(
+            segments,
+            start=1,
+        ):
+            end_sector = (
+                segment["start_sector"]
+                + segment["sectors"]
+            )
+
+            print(f"Segment {index}:")
+            print(
+                f"  BIN:               "
+                f"{segment['path']}"
+            )
+            print(
+                f"  Redumper track:    "
+                f"{segment['track']:02d}"
+            )
+            print(
+                f"  Start sector:      "
+                f"{segment['start_sector']:,}"
+            )
+            print(
+                f"  End sector:        "
+                f"{end_sector:,} [exclusive]"
+            )
+            print(
+                f"  Sectors used:      "
+                f"{segment['sectors']:,}"
+            )
+
+        print()
+        print(
+            f"Total sectors:       "
+            f"{total_sectors:,}"
+        )
+        print(
+            f"Duration:            "
+            f"{sectors_to_msf(total_sectors)}"
+        )
+        print(
+            f"Temporary WAV:       "
+            f"{wav_path}"
+        )
+
+    wav_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    block_sectors = 1024
+
+    with wave.open(
+        str(wav_path),
+        "wb",
+    ) as dst:
+
+        dst.setnchannels(CHANNELS)
+        dst.setsampwidth(SAMPLE_WIDTH)
+        dst.setframerate(SAMPLE_RATE)
+
+        for segment in segments:
+
+            with segment["path"].open(
+                "rb"
+            ) as src:
+
+                src.seek(
+                    segment["start_sector"]
+                    * SECTOR_SIZE
+                )
+
+                remaining = (
+                    segment["sectors"]
+                )
+
+                while remaining > 0:
+
+                    count = min(
+                        block_sectors,
+                        remaining,
+                    )
+
+                    expected_bytes = (
+                        count
+                        * SECTOR_SIZE
+                    )
+
+                    data = src.read(
+                        expected_bytes
+                    )
+
+                    if (
+                        len(data)
+                        != expected_bytes
+                    ):
+                        raise RuntimeError(
+                            "Unexpected end of BIN."
+                        )
+
+                    # No endian swap.
+                    dst.writeframesraw(
+                        data
+                    )
+
+                    remaining -= count
+
+
+def remove_output_job_files(output_jobs):
+    for job in output_jobs:
+        for path in (
+            job["temporary_path"],
+            job["output_path"],
+        ):
+            if path.exists():
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+
+
+def create_output_files(output_jobs, verbose=False):
+    try:
+        for job in output_jobs:
+            if job["kind"] == "data":
+                data_track_to_iso(
+                    job["data_track"],
+                    job["temporary_path"],
+                    verbose=verbose,
+                )
+            else:
+                segments_to_wav(
+                    job["segments"],
+                    job["temporary_path"],
+                    job["expected_sectors"],
+                    verbose=verbose,
+                )
+
+        for job in output_jobs:
+            job["temporary_path"].replace(
+                job["output_path"]
+            )
+
+    except BaseException:
+        remove_output_job_files(
+            output_jobs
+        )
+        raise
+
+
+# ----------------------------------------------------------------------
+# Main
+# ----------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Extract one or more CD tracks using MMC and cdparanoia for\n"
+            "validated track boundaries and redumper for the actual\n"
+            "offset-corrected extraction."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+TRACK SELECTION:
+  N      extract Track N
+  N-M    extract Tracks N through M, inclusive
+  -M     extract Track 1 through M, inclusive
+  N-     extract Track N through the final numbered track
+  -      extract Track 1 through the final numbered track (default)
+
+Omitting TRACK is equivalent to '-'. Track 0 is never implicit; request it
+explicitly with 0 or a range such as 0-3.
+
+By default, open ranges omit data tracks. A single N or fully bounded N-M
+selection fails if it explicitly names a data track. Use --include-data to
+include data tracks. --single-file cannot combine audio and data tracks.
+""",
+    )
+
+    parser.add_argument(
+        "device",
+    )
+
+    parser.add_argument(
+        "track",
+        type=parse_track_selection,
+        nargs="?",
+        default=parse_track_selection("-"),
+        metavar="TRACK",
+        help=(
+            "Track number or range: N, N-M, -M, N-, or - "
+            "(default: -, the full disc)"
+        ),
+    )
+
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help=(
+            "Output path for --single-file "
+            "(default: ./PREFIX.wav or ./PREFIXNN.ext)"
+        ),
+    )
+
+    parser.add_argument(
+        "--retries",
+        type=int,
+        default=100,
+        help=(
+            "Sector retries per redumper pass "
+            "(default: 100)"
+        ),
+    )
+
+    parser.add_argument(
+        "--refine-passes",
+        type=int,
+        default=DEFAULT_REFINE_PASSES,
+        help=(
+            "Maximum refine passes when SCSI/C2 "
+            f"errors remain (default: "
+            f"{DEFAULT_REFINE_PASSES})"
+        ),
+    )
+
+    parser.add_argument(
+        "-X",
+        "--abort-on-skip",
+        action="store_true",
+        help=(
+            "Do not create output if SCSI or C2 "
+            "errors remain after refinement "
+            "(default: write output with a warning)"
+        ),
+    )
+
+    parser.add_argument(
+        "-s",
+        "--single-file",
+        action="store_true",
+        help=(
+            "Combine selected audio tracks into one PREFIX.wav "
+            "(default: one PREFIXNN.wav or PREFIXNN.iso per track)"
+        ),
+    )
+
+    parser.add_argument(
+        "-p",
+        "--prefix",
+        default="track",
+        metavar="PREFIX",
+        help=(
+            "Prefix for automatically named output files "
+            "(default: track)"
+        ),
+    )
+
+    parser.add_argument(
+        "-d",
+        "--include-data",
+        action="store_true",
+        help=(
+            "Include data tracks as PREFIXNN.iso; incompatible with "
+            "--single-file unless TRACK is one explicit data track "
+            "(default: omit data tracks)"
+        ),
+    )
+
+    parser.add_argument(
+        "--show-layout",
+        action="store_true",
+        help=(
+            "Print the complete audio/data track layout and exit "
+            "without dumping"
+        ),
+    )
+
+    parser.add_argument(
+        "--no-accuraterip",
+        dest="accuraterip",
+        action="store_false",
+        default=True,
+        help=(
+            "Disable AccurateRip verification "
+            "(default: enabled when ARver is installed)"
+        ),
+    )
+
+    output_mode = parser.add_mutually_exclusive_group()
+
+    output_mode.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help=(
+            "Show commands, full tool output, ranges, "
+            "and conversion details "
+            "(default output mode: concise)"
+        ),
+    )
+
+    output_mode.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help=(
+            "Suppress routine output "
+            "(default output mode: concise)"
+        ),
+    )
+
+    args = parser.parse_args()
+
+    if args.retries < 0:
+        sys.exit(
+            "ERROR: invalid retry count"
+        )
+
+    if args.refine_passes < 0:
+        sys.exit(
+            "ERROR: invalid refine-pass count"
+        )
+
+    if (
+        not args.prefix
+        or args.prefix in (".", "..")
+        or Path(args.prefix).name != args.prefix
+    ):
+        parser.error(
+            "--prefix must be a non-empty filename prefix "
+            "without directory components"
+        )
+
+    if args.accuraterip and not args.show_layout:
+        try:
+            load_accuraterip_library()
+        except RuntimeError:
+            args.accuraterip = False
+
+    if (
+        args.include_data
+        and not args.show_layout
+        and args.single_file
+        and (
+            args.track["start"] is None
+            or args.track["end"] is None
+            or args.track["start"]
+            != args.track["end"]
+        )
+    ):
+        parser.error(
+            "--include-data cannot use --single-file for a track range"
+        )
+
+    if shutil.which(
+        "cdparanoia"
+    ) is None:
+        sys.exit(
+            "ERROR: cdparanoia not found"
+        )
+
+    if shutil.which(
+        "sg_raw"
+    ) is None:
+        sys.exit(
+            "ERROR: sg_raw not found"
+        )
+
+    if args.show_layout:
+        try:
+            tracks = read_disc_layout(
+                args.device,
+                verbose=args.verbose,
+            )
+        except RuntimeError as exc:
+            sys.exit(
+                f"ERROR: {exc}"
+            )
+
+        if not args.quiet:
+            print_disc_layout(
+                tracks
+            )
+        return
+
+    if not args.single_file and args.output:
+        parser.error(
+            "--output requires --single-file; separate files use "
+            "PREFIXNN.wav or PREFIXNN.iso in the current directory"
+        )
+
+    if shutil.which(
+        "redumper"
+    ) is None:
+        sys.exit(
+            "ERROR: redumper not found"
+        )
+
+    prefix = "riptrack-redump-"
+
+    with tempfile.TemporaryDirectory(
+        prefix=prefix,
+    ) as temporary_path:
+        workdir = Path(temporary_path)
+
+        if args.verbose:
+            print(
+                f"Temporary workspace: {workdir}"
+            )
+
+        extract_track(
+            args,
+            workdir,
+        )
+
+    if args.verbose:
+        print(
+            f"Temporary workspace removed: {workdir}"
+        )
+
+
+def extract_track(args, workdir):
+
+    concise = (
+        not args.verbose
+        and not args.quiet
+    )
+
+    # --------------------------------------------------------------
+    # Track layout
+    # --------------------------------------------------------------
+
+    try:
+        disc_tracks = read_disc_layout(
+            args.device,
+            verbose=args.verbose,
+        )
+        selected_tracks = resolve_disc_selection(
+            disc_tracks,
+            args.track,
+            include_data=args.include_data,
+        )
+
+        validate_data_output_mode(
+            selected_tracks,
+            args.include_data,
+            args.single_file,
+        )
+
+        if getattr(
+            args,
+            "accuraterip",
+            False,
+        ):
+            accuraterip_layout_type(
+                disc_tracks
+            )
+
+            if not any(
+                track.get("kind", "audio") == "audio"
+                and track["number"] != 0
+                for track in selected_tracks
+            ):
+                raise RuntimeError(
+                    "The selection contains no AccurateRip-verifiable "
+                    "audio tracks; Track 0 and data tracks are not tracked."
+                )
+
+    except RuntimeError as exc:
+        sys.exit(
+            f"ERROR: {exc}"
+        )
+
+    if args.verbose:
+        for track in selected_tracks:
+            print_selected_track(
+                track
+            )
+
+    first_track = selected_tracks[0]
+    last_track = selected_tracks[-1]
+    track_label = format_track_numbers(
+        selected_tracks
+    )
+
+    logical_start_lba = (
+        first_track["begin"]
+    )
+
+    logical_end_lba = (
+        last_track["end"]
+    )
+
+    expected_sectors = (
+        sum(
+            track["length"]
+            for track in selected_tracks
+        )
+    )
+
+    dump_start_lba = (
+        logical_start_lba
+    )
+
+    dump_end_lba = (
+        logical_end_lba
+        + END_PADDING_SECTORS
+    )
+
+    # --------------------------------------------------------------
+    # Paths
+    # --------------------------------------------------------------
+
+    image_name = (
+        f"track{first_track['number']:02d}"
+        if len(selected_tracks) == 1
+        else (
+            f"tracks{first_track['number']:02d}-"
+            f"{last_track['number']:02d}"
+        )
+    )
+
+    output_jobs = build_output_jobs(
+        selected_tracks,
+        args.single_file,
+        output=args.output,
+        prefix=args.prefix,
+    )
+
+    output_paths = [
+        job["output_path"]
+        for job in output_jobs
+    ]
+
+    for job in output_jobs:
+        job["temporary_path"] = (
+            job["output_path"].with_name(
+                f".{job['output_path'].name}.part"
+            )
+        )
+
+    if concise:
+        print(
+            f"Ripping track{'' if len(selected_tracks) == 1 else 's'} "
+            f"{track_label} from "
+            f"sector {logical_start_lba} to "
+            f"{logical_end_lba - 1}"
+        )
+
+        if not args.single_file:
+            print(
+                f"Output: {len(output_paths)} separate files"
+            )
+        else:
+            print(
+                f"Output: {output_paths[0]}"
+            )
+
+    before = snapshot_files(
+        workdir
+    )
+
+    for output_path in output_paths:
+        if output_path.exists():
+            output_path.unlink()
+
+    for job in output_jobs:
+        temporary_path = job["temporary_path"]
+        if temporary_path.exists():
+            temporary_path.unlink()
+
+    # --------------------------------------------------------------
+    # Commands
+    # --------------------------------------------------------------
+
+    dump_command = [
+        "redumper",
+        "dump",
+        f"--drive={args.device}",
+        f"--image-path={workdir}",
+        f"--image-name={image_name}",
+        f"--retries={args.retries}",
+        f"--lba-start={dump_start_lba}",
+        f"--lba-end={dump_end_lba}",
+    ]
+
+    refine_command = [
+        "redumper",
+        "refine",
+        f"--drive={args.device}",
+        f"--image-path={workdir}",
+        f"--image-name={image_name}",
+        f"--retries={args.retries}",
+        f"--lba-start={dump_start_lba}",
+        f"--lba-end={dump_end_lba}",
+    ]
+
+    # Partial dumps are expected to be incomplete, so force-split
+    # is required after the configured error policy is applied.
+    split_command = [
+        "redumper",
+        "split",
+        f"--image-path={workdir}",
+        f"--image-name={image_name}",
+        "--force-split",
+    ]
+
+    if any(
+        track.get("kind", "audio") == "data"
+        for track in selected_tracks
+    ):
+        split_command.append(
+            "--filesystem-trim"
+        )
+
+    # --------------------------------------------------------------
+    # Initial dump
+    # --------------------------------------------------------------
+
+    if args.verbose:
+        print()
+        print("Initial partial dump")
+        print("====================")
+
+    returncode, output = (
+        run_command_capture(
+            dump_command,
+            verbose=args.verbose,
+            progress_label=(
+                "Reading"
+                if concise
+                else None
+            ),
+            progress_tracks=selected_tracks,
+        )
+    )
+
+    if returncode != 0:
+        sys.exit(
+            "ERROR: redumper dump failed.\n"
+            "No output file was created."
+        )
+
+    errors = parse_media_errors(
+        output
+    )
+
+    if errors is None:
+        sys.exit(
+            "ERROR: Could not determine redumper "
+            "SCSI/C2 error status from dump output.\n"
+            "Refusing to create output because dump "
+            "integrity cannot be verified."
+        )
+
+    if args.verbose:
+        print_media_errors(
+            errors
+        )
+
+    # --------------------------------------------------------------
+    # Refine ONLY if SCSI/C2 errors remain.
+    # --------------------------------------------------------------
+
+    refine_passes_used = 0
+
+    while data_errors_present(
+        errors
+    ):
+
+        if (
+            refine_passes_used
+            >= args.refine_passes
+        ):
+            break
+
+        refine_passes_used += 1
+
+        if args.verbose:
+            print()
+            print(
+                f"Refine pass "
+                f"{refine_passes_used}/"
+                f"{args.refine_passes}"
+            )
+            print(
+                "================"
+            )
+
+            print(
+                f"Refining only LBA "
+                f"{dump_start_lba}.."
+                f"{dump_end_lba} "
+                f"[end exclusive]"
+            )
+
+        returncode, output = (
+            run_command_capture(
+                refine_command,
+                verbose=args.verbose,
+                progress_label=(
+                    (
+                        f"Refining "
+                        f"{refine_passes_used}/"
+                        f"{args.refine_passes}"
+                    )
+                    if concise
+                    else None
+                ),
+                progress_tracks=selected_tracks,
+            )
+        )
+
+        if returncode != 0:
+            sys.exit(
+                "ERROR: redumper refine failed.\n"
+                "No output file was created."
+            )
+
+        errors = parse_media_errors(
+            output
+        )
+
+        if errors is None:
+            sys.exit(
+                "ERROR: Could not determine redumper "
+                "SCSI/C2 error status after refine.\n"
+                "No output file was created."
+            )
+
+        if args.verbose:
+            print_media_errors(
+                errors
+            )
+
+    unresolved_errors = data_errors_present(
+        errors
+    )
+
+    if should_abort_on_errors(
+        errors,
+        args.abort_on_skip,
+    ):
+        sys.exit(
+            "ERROR: SCSI/C2 errors remain after "
+            f"{refine_passes_used} refine pass"
+            f"{'' if refine_passes_used == 1 else 'es'}.\n"
+            f"Remaining SCSI errors: "
+            f"{errors['SCSI']}\n"
+            f"Remaining C2 errors:   "
+            f"{errors['C2']}\n"
+            "No output file was created because "
+            "--abort-on-skip was specified."
+        )
+
+    if unresolved_errors and concise:
+        print(
+            "Warning: writing output with unresolved "
+            f"SCSI={errors['SCSI']}, C2={errors['C2']}"
+        )
+
+    # --------------------------------------------------------------
+    # Final error status.
+    # --------------------------------------------------------------
+
+    if args.verbose:
+        print()
+        print("Data integrity")
+        print("==============")
+
+        print()
+        print(f"SCSI: {errors['SCSI']}")
+        print(f"C2:   {errors['C2']}")
+        print(
+            f"Q:    {errors['Q']} "
+            "(reported, not used as audio-data failure criterion)"
+        )
+
+        print()
+        if unresolved_errors:
+            print(
+                "WARNING: unresolved SCSI/C2 errors "
+                "will be included in the forced split."
+            )
+        else:
+            print(
+                f"PASS after {refine_passes_used} "
+                f"refine pass"
+                f"{'' if refine_passes_used == 1 else 'es'}."
+            )
+
+    # --------------------------------------------------------------
+    # Force split because the disc was intentionally only
+    # partially read.
+    # --------------------------------------------------------------
+
+    if args.verbose:
+        print()
+        print("Splitting partial dump")
+        print("======================")
+
+    try:
+        run_command(
+            split_command,
+            verbose=args.verbose,
+            status_label=(
+                "Splitting"
+                if concise
+                else None
+            ),
+        )
+
+    except subprocess.CalledProcessError as exc:
+        sys.exit(
+            "ERROR: redumper could not split the "
+            "partial dump even with --force-split.\n"
+            f"Exit status: {exc.returncode}\n"
+            "No output file was created."
+        )
+
+    # --------------------------------------------------------------
+    # Locate split audio and data tracks.
+    # --------------------------------------------------------------
+
+    changed = changed_files(
+        workdir,
+        before,
+    )
+
+    try:
+        track_zero_sectors = (
+            first_track["length"]
+            if first_track["number"] == 0
+            else None
+        )
+        accuraterip_tracks = []
+
+        for job in output_jobs:
+            if job["kind"] == "data":
+                job["data_track"] = identify_generated_data_track(
+                    workdir,
+                    image_name,
+                    changed,
+                    job["track"]["number"],
+                )
+                job["cue_path"] = job["data_track"]["cue_path"]
+                job["pregap_skipped"] = (
+                    job["data_track"]["start_sector"]
+                )
+                continue
+
+            job["segments"] = []
+            job["pregap_skipped"] = None
+
+            for component_track in job["component_tracks"]:
+                (
+                    component_segments,
+                    job["cue_path"],
+                    component_pregap_skipped,
+                ) = identify_generated_audio_segments(
+                    workdir,
+                    image_name,
+                    changed,
+                    component_track["number"],
+                    component_track["length"],
+                    track_zero_sectors=track_zero_sectors,
+                )
+
+                job["segments"].extend(
+                    component_segments
+                )
+
+                if (
+                    getattr(
+                        args,
+                        "accuraterip",
+                        False,
+                    )
+                    and component_track["number"] != 0
+                ):
+                    accuraterip_tracks.append(
+                        {
+                            "track": component_track,
+                            "segments": component_segments,
+                        }
+                    )
+
+                if job["pregap_skipped"] is None:
+                    job["pregap_skipped"] = (
+                        component_pregap_skipped
+                    )
+
+    except RuntimeError as exc:
+        sys.exit(
+            f"ERROR: {exc}\n"
+            "No output file was created."
+        )
+
+    # --------------------------------------------------------------
+    # Convert to temporary WAV/ISO files, then commit the full set.
+    # --------------------------------------------------------------
+
+    try:
+        if concise:
+            print(
+                (
+                    f"Writing {len(output_jobs)} output files..."
+                    if not args.single_file
+                    else (
+                        "Writing ISO..."
+                        if output_jobs[0]["kind"] == "data"
+                        else "Writing WAV..."
+                    )
+                ),
+                end="",
+                flush=True,
+            )
+
+        create_output_files(
+            output_jobs,
+            verbose=args.verbose,
+        )
+
+        if concise:
+            print(" done")
+
+    except BaseException as exc:
+
+        if concise:
+            print(" failed")
+
+        if isinstance(
+            exc,
+            (KeyboardInterrupt, TerminationRequested),
+        ):
+            raise
+
+        sys.exit(
+            f"ERROR: output creation failed: {exc}"
+        )
+
+    # --------------------------------------------------------------
+    # Optional AccurateRip verification. Output creation is already
+    # complete, so lookup failures or checksum mismatches never remove
+    # successfully written WAV/ISO files.
+    # --------------------------------------------------------------
+
+    if getattr(
+        args,
+        "accuraterip",
+        False,
+    ):
+        if concise:
+            print(
+                "Checking AccurateRip...",
+                flush=True,
+            )
+
+        try:
+            accuraterip_report = verify_with_accuraterip(
+                disc_tracks,
+                accuraterip_tracks,
+                workdir,
+            )
+        except RuntimeError as exc:
+            sys.exit(
+                f"ERROR: AccurateRip verification failed: {exc}\n"
+                "Completed output files were retained."
+            )
+
+        if not args.quiet:
+            print_accuraterip_report(
+                accuraterip_report,
+                verbose=args.verbose,
+            )
+
+    # --------------------------------------------------------------
+    # Complete
+    # --------------------------------------------------------------
+
+    if args.verbose:
+        print()
+        print("Complete")
+        print("========")
+
+        print(
+            f"Tracks:             "
+            f"{track_label}"
+        )
+
+        print(
+            f"Logical LBA range:  "
+            f"{logical_start_lba}.."
+            f"{logical_end_lba}"
+        )
+
+        print(
+            f"Physical read range:"
+            f" {dump_start_lba}.."
+            f"{dump_end_lba}"
+        )
+
+        print(
+            f"Selected sectors:   "
+            f"{expected_sectors:,}"
+        )
+
+        print(
+            f"Refine passes used: "
+            f"{refine_passes_used}"
+        )
+
+        print(
+            f"Final SCSI errors:  "
+            f"{errors['SCSI']}"
+        )
+
+        print(
+            f"Final C2 errors:    "
+            f"{errors['C2']}"
+        )
+
+        print(
+            f"Final Q errors:     "
+            f"{errors['Q']}"
+        )
+
+        for job in output_jobs:
+            print(
+                f"Track {job['track']['number']:02d} BIN offset: "
+                f"{job['pregap_skipped']:,} sectors"
+                if job["track"] is not None
+                else (
+                    f"Initial BIN offset: "
+                    f"{job['pregap_skipped']:,} sectors"
+                )
+            )
+            print(
+                f"Temporary CUE:      "
+                f"{job['cue_path']}"
+            )
+            print(
+                f"{'ISO' if job['kind'] == 'data' else 'WAV'}:"
+                f"                {job['output_path']}"
+            )
+
+        print()
+        if unresolved_errors:
+            print(
+                "Integrity:          WARNING "
+                f"(SCSI={errors['SCSI']}, "
+                f"C2={errors['C2']})"
+            )
+        else:
+            print(
+                "Integrity:          PASS "
+                "(SCSI=0, C2=0)"
+            )
+    elif concise:
+        print(
+            f"Done. SCSI={errors['SCSI']}, "
+            f"C2={errors['C2']}, Q={errors['Q']}"
+        )
+
+
+def handle_termination_signal(signum, _frame):
+    raise TerminationRequested(signum)
+
+
+def install_signal_handlers():
+    for signal_name in (
+        "SIGHUP",
+        "SIGTERM",
+    ):
+        signum = getattr(
+            signal,
+            signal_name,
+            None,
+        )
+
+        if signum is not None:
+            signal.signal(
+                signum,
+                handle_termination_signal,
+            )
+
+
+def run():
+    install_signal_handlers()
+
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(
+            "\nInterrupted. Temporary files were cleaned up."
+        )
+    except TerminationRequested as exc:
+        sys.exit(
+            f"\nReceived {exc.signal_name}. "
+            "Temporary files were cleaned up."
+        )
+
+
+if __name__ == "__main__":
+    run()
