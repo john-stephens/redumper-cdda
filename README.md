@@ -58,7 +58,7 @@ pipx install 'redumper-cdda[accuraterip]'
 Until the first PyPI release, install directly from GitHub instead:
 
 ``` bash
-pipx install 'redumper-cdda[accuraterip] @ git+https://github.com/john-stephens/riptrack-redump.git'
+pipx install 'redumper-cdda[accuraterip] @ git+https://github.com/john-stephens/redumper-cdda.git'
 ```
 
 From an existing checkout, use `pipx install .` or install the AccurateRip

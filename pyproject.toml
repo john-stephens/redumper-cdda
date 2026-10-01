@@ -18,9 +18,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/john-stephens/riptrack-redump"
-Repository = "https://github.com/john-stephens/riptrack-redump"
-Issues = "https://github.com/john-stephens/riptrack-redump/issues"
+Homepage = "https://github.com/john-stephens/redumper-cdda"
+Repository = "https://github.com/john-stephens/redumper-cdda"
+Issues = "https://github.com/john-stephens/redumper-cdda/issues"
 
 [project.optional-dependencies]
 accuraterip = ["ARver>=1.5,<2"]
