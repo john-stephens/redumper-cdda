@@ -2853,7 +2853,7 @@ include data tracks. --single-file cannot combine audio and data tracks.
             "ERROR: redumper not found"
         )
 
-    prefix = "riptrack-redump-"
+    prefix = "redumper-cdda-"
 
     with tempfile.TemporaryDirectory(
         prefix=prefix,

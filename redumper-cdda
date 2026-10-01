@@ -9,7 +9,7 @@ sys.path.insert(
     str(Path(__file__).resolve().parent / "src"),
 )
 
-from riptrack_redump.cli import run
+from redumper_cdda.cli import run
 
 
 if __name__ == "__main__":

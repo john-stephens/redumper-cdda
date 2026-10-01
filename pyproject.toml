@@ -3,12 +3,13 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "riptrack-redump"
+name = "redumper-cdda"
 version = "0.1.0"
-description = "Extract contiguous CD tracks with redumper"
+description = "Accurately extract CD audio track ranges with redumper"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = []
+keywords = ["accuraterip", "cdda", "cd-ripping", "redumper"]
 classifiers = [
     "Environment :: Console",
     "Operating System :: POSIX :: Linux",
@@ -25,7 +26,7 @@ Issues = "https://github.com/john-stephens/riptrack-redump/issues"
 accuraterip = ["ARver>=1.5,<2"]
 
 [project.scripts]
-riptrack-redump = "riptrack_redump.cli:run"
+redumper-cdda = "redumper_cdda.cli:run"
 
 [tool.setuptools.packages.find]
 where = ["src"]

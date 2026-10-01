@@ -18,14 +18,14 @@ from unittest import mock
 SCRIPT_PATH = (
     Path(__file__).parent
     / "src"
-    / "riptrack_redump"
+    / "redumper_cdda"
     / "cli.py"
 )
 
 
 def load_script():
     loader = importlib.machinery.SourceFileLoader(
-        "riptrack_redump",
+        "redumper_cdda",
         str(SCRIPT_PATH),
     )
     spec = importlib.util.spec_from_loader(
@@ -894,7 +894,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                 source_directory = workdir / "source"
                 source_directory.mkdir()
                 (source_directory / "README.TXT").write_text(
-                    "riptrack-redump ISO test\n",
+                    "redumper-cdda ISO test\n",
                     encoding="ascii",
                 )
                 result = subprocess.run(

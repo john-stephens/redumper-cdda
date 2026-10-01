@@ -2,7 +2,7 @@
 
 ## Mission
 
-Maintain `riptrack-redump`, a Linux utility that extracts one or more
+Maintain `redumper-cdda`, a Linux utility that extracts one or more
 contiguous CD tracks with redumper. It reads the complete track layout
 with MMC `READ TOC` and retains cdparanoia as the validated authority for
 audio-track boundaries during the MMC migration.
@@ -445,9 +445,9 @@ must not introduce any sample differences in the established comparison.
 
 ## Coding guidance
 
-The installable package lives under `src/riptrack_redump`. Keep the repository
-`riptrack-redump` launcher thin; the pipx console script and repository launcher
-must both call `riptrack_redump.cli.run` so behavior cannot diverge.
+The installable package lives under `src/redumper_cdda`. Keep the repository
+`redumper-cdda` launcher thin; the pipx console script and repository launcher
+must both call `redumper_cdda.cli.run` so behavior cannot diverge.
 
 Keep sector arithmetic explicit and auditable. Prefer names such as:
 

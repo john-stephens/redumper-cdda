@@ -1,8 +1,8 @@
-# riptrack-redump
+# redumper-cdda
 
 ## Overview
 
-`riptrack-redump` makes it convenient to extract a single CD track or a
+`redumper-cdda` makes it convenient to extract a single CD track or a
 contiguous track range without giving up redumper's preservation-oriented
 acquisition. redumper performs the low-level read, error detection, retry, and
 refinement work; the script adds track selection, boundary validation, concise
@@ -45,44 +45,50 @@ Install the command in an isolated environment with
 [pipx](https://pipx.pypa.io/):
 
 ``` bash
-pipx install 'riptrack-redump @ git+https://github.com/john-stephens/riptrack-redump.git'
+pipx install redumper-cdda
 ```
 
 To include automatic AccurateRip verification, install the `accuraterip`
 extra:
 
 ``` bash
-pipx install 'riptrack-redump[accuraterip] @ git+https://github.com/john-stephens/riptrack-redump.git'
+pipx install 'redumper-cdda[accuraterip]'
 ```
 
-From an existing checkout, use `pipx install .` or
-`pipx install '.[accuraterip]'`. The installation creates the
-`riptrack-redump` command on the user path. System tools such as redumper,
+Until the first PyPI release, install directly from GitHub instead:
+
+``` bash
+pipx install 'redumper-cdda[accuraterip] @ git+https://github.com/john-stephens/riptrack-redump.git'
+```
+
+From an existing checkout, use `pipx install .` or install the AccurateRip
+extra with `pipx install '.[accuraterip]'`. The installation creates the
+`redumper-cdda` command on the user path. System tools such as redumper,
 cdparanoia, and `sg_raw` remain external requirements.
 
 ## Usage
 
 ``` bash
-riptrack-redump /dev/sg4        # Full disc (all audio tracks)
-riptrack-redump /dev/sg4 -      # Explicit full-disc selection
-riptrack-redump /dev/sg4 2
+redumper-cdda /dev/sg4        # Full disc (all audio tracks)
+redumper-cdda /dev/sg4 -      # Explicit full-disc selection
+redumper-cdda /dev/sg4 2
 ```
 
 Typical optional controls:
 
 ``` bash
-riptrack-redump /dev/sg4 2 --retries=100 --refine-passes=3
+redumper-cdda /dev/sg4 2 --retries=100 --refine-passes=3
 ```
 
 Track selections may be a single track or a contiguous range:
 
 ``` bash
-riptrack-redump /dev/sg4 -      # Track 1 through the final track
-riptrack-redump /dev/sg4 2      # Track 2
-riptrack-redump /dev/sg4 1-3    # Tracks 1 through 3
-riptrack-redump /dev/sg4 -3     # Tracks 1 through 3
-riptrack-redump /dev/sg4 3-     # Track 3 through the final track
-riptrack-redump /dev/sg4 0-3    # Track 0 through Track 3
+redumper-cdda /dev/sg4 -      # Track 1 through the final track
+redumper-cdda /dev/sg4 2      # Track 2
+redumper-cdda /dev/sg4 1-3    # Tracks 1 through 3
+redumper-cdda /dev/sg4 -3     # Tracks 1 through 3
+redumper-cdda /dev/sg4 3-     # Track 3 through the final track
+redumper-cdda /dev/sg4 0-3    # Track 0 through Track 3
 ```
 
 Omitting the selection defaults to `-`, which selects the full disc from
@@ -102,10 +108,10 @@ mode supports mixed or multi-track selections containing data. One explicitly
 named data track may also be extracted with `--single-file`:
 
 ``` bash
-riptrack-redump /dev/sg4 1 --include-data
-riptrack-redump /dev/sg4 1-3 --include-data
-riptrack-redump /dev/sg4 -3 -d
-riptrack-redump /dev/sg4 -d  # Full disc, including data tracks
+redumper-cdda /dev/sg4 1 --include-data
+redumper-cdda /dev/sg4 1-3 --include-data
+redumper-cdda /dev/sg4 -3 -d
+redumper-cdda /dev/sg4 -d  # Full disc, including data tracks
 ```
 
 With `--include-data`, ranges include both audio and data tracks. Audio files
@@ -118,7 +124,7 @@ By default, each selected track is written separately as `trackNN.wav` or
 into one `track.wav` while retaining the same single dump:
 
 ``` bash
-riptrack-redump /dev/sg4 1-3 --single-file
+redumper-cdda /dev/sg4 1-3 --single-file
 ```
 
 `--output=PATH` sets the `--single-file` output filename. It applies to a
@@ -129,7 +135,7 @@ Use `-p` or `--prefix` to replace the default `track` prefix on automatically
 named files:
 
 ``` bash
-riptrack-redump /dev/sg4 1-3 --prefix album
+redumper-cdda /dev/sg4 1-3 --prefix album
 # Writes album01.wav, album02.wav, and album03.wav
 ```
 
@@ -140,7 +146,7 @@ commands, complete redumper output, exact ranges, split segments, and
 the full integrity summary:
 
 ``` bash
-riptrack-redump /dev/sg4 2 --verbose
+redumper-cdda /dev/sg4 2 --verbose
 ```
 
 Use `-q` or `--quiet` to suppress routine output. Errors are still
@@ -148,15 +154,15 @@ written to standard error and the exit status still indicates success
 or failure:
 
 ``` bash
-riptrack-redump /dev/sg4 2 --quiet
+redumper-cdda /dev/sg4 2 --quiet
 ```
 
 When ARver is installed, the script calculates ARv1 and ARv2 checksums and
 compares selected audio tracks with the AccurateRip database automatically:
 
 ``` bash
-riptrack-redump /dev/sg4
-riptrack-redump /dev/sg4 2
+redumper-cdda /dev/sg4
+redumper-cdda /dev/sg4 2
 ```
 
 AccurateRip verification uses the complete MMC disc layout to identify the
@@ -169,7 +175,7 @@ Use `--no-accuraterip` to disable AccurateRip verification even when ARver is
 installed:
 
 ``` bash
-riptrack-redump /dev/sg4 2 --no-accuraterip
+redumper-cdda /dev/sg4 2 --no-accuraterip
 ```
 
 Each run creates a unique temporary workspace for redumper's dump, state,
@@ -189,7 +195,7 @@ To inspect the complete audio/data track layout without dumping anything,
 omit the track number and use:
 
 ``` bash
-riptrack-redump /dev/sg4 --show-layout
+redumper-cdda /dev/sg4 --show-layout
 ```
 
 ## Extraction details
