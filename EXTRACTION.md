@@ -117,9 +117,13 @@ default, the script also writes output if SCSI or C2 errors remain after all
 configured refinement passes. It reports the
 remaining counts so the result is not mistaken for an error-free rip.
 
-Use `-X` or `--abort-on-skip` to require SCSI and C2 to both reach zero.
-With that option, unresolved SCSI/C2 errors cause a nonzero exit and no
-output is created:
+Use `-X` or `--abort-on-skip` to prevent unresolved SCSI/C2 errors from being
+written. In the default separate-file mode, the final redumper sample-state
+file and the write-offset mapping reported by `split` are used to classify the
+exact logical LBA range of each selected track. Clean track files are retained,
+affected track files are omitted, and the command exits nonzero when any file
+is omitted. With `--single-file`, the range remains all-or-nothing: any
+unresolved SCSI/C2 error causes a nonzero exit and no output is created.
 
 ``` bash
 redumper-cdda /dev/sg4 2 --abort-on-skip
@@ -142,10 +146,10 @@ inspect SCSI/C2 status
                        repeat as needed
                               |
                  still nonzero at limit
-                         /           \
-                  default             -X
-                     |                 |
-              write with warning     FAIL
+                         /                    \
+                  default                      -X
+                     |                 separate / single
+              write with warning       omit bad / FAIL all
 ```
 
 Run `refine` only when SCSI or C2 errors remain. Restrict it to exactly
@@ -263,7 +267,10 @@ alignment. Do not encode 48 as a universal production offset.
 -   Data ISO output begins at INDEX 01 and contains 2048-byte sectors.
 -   Data ISO output is validated and trimmed to its ISO9660 volume size.
 -   By default, unresolved SCSI/C2 errors produce warned output.
--   With `--abort-on-skip`, unresolved SCSI/C2 errors produce no output.
+-   With `--abort-on-skip`, separate output omits only tracks whose logical
+    ranges contain unresolved SCSI/C2 states and retains clean track files.
+-   With `--abort-on-skip --single-file`, unresolved SCSI/C2 errors produce no
+    output.
 -   Q is currently informational.
 -   Refine only when SCSI/C2 remain.
 -   Refine only the same partial physical LBA range.

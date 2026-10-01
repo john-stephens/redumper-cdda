@@ -246,8 +246,12 @@ The default behavior is to create output even if SCSI or C2 errors remain
 after the configured refinement passes. Print the final counts and clearly
 identify the result as having unresolved errors.
 
-When `-X` or `--abort-on-skip` is supplied, SCSI and C2 must both be
-zero. If either remains nonzero, exit nonzero and create no final output.
+When `-X` or `--abort-on-skip` is supplied in separate-output mode, inspect
+redumper's final sample-level state using the write-offset mapping established
+by split. Omit only track files whose exact logical ranges contain unresolved
+SCSI or C2 states, retain clean track files, and exit nonzero if any selected
+track is omitted. With `--single-file`, SCSI and C2 must both be zero across
+the range; otherwise exit nonzero and create no final output.
 
 ### Never use normal split failure as the C2 detector
 
@@ -330,8 +334,9 @@ full disc.
 
 Stop refinement immediately when SCSI and C2 are both zero. If the configured
 maximum passes are exhausted with errors remaining, apply the selected policy:
-write warned output by default, or exit nonzero and create no output when
-`--abort-on-skip` is active.
+write warned output by default; with `--abort-on-skip`, omit affected separate
+track outputs while retaining clean ones, or reject the entire output when
+`--single-file` is active.
 
 ## Partial splitting
 
@@ -350,8 +355,8 @@ Fail closed and do not leave misleading WAV or ISO output when:
 -   requested track does not exist;
 -   redumper dump fails;
 -   SCSI/C2 state cannot be determined;
--   SCSI/C2 remain after allowed refinement and `--abort-on-skip` is
-    active;
+-   SCSI/C2 remain after allowed refinement and `--abort-on-skip` is active
+    for the output track being considered, or anywhere in a single-file range;
 -   force-split fails;
 -   CUE cannot be found or parsed;
 -   selected audio track lacks INDEX 01;
@@ -364,9 +369,10 @@ Fail closed and do not leave misleading WAV or ISO output when:
 If output creation has begun when a failure occurs, remove every incomplete
 WAV, ISO, and temporary sibling file.
 
-For separate output, commit final names only after every conversion succeeds.
-A failure or interruption must remove the entire new output set so a partial
-set is never presented as complete.
+For separate output, commit final names only after every permitted conversion
+succeeds. A conversion failure or interruption must remove the entire new
+output set so a partial set is never presented as complete. Tracks deliberately
+omitted by `--abort-on-skip` are not part of that permitted output set.
 
 Create redumper's intermediate files in a unique temporary workspace.
 Remove that workspace after success, failure, SIGINT, SIGHUP, or SIGTERM.
@@ -412,6 +418,9 @@ Prefer unit tests for pure parsing/range functions. Cover:
 -   ISO9660 primary-volume validation and exact filesystem trimming;
 -   mixed separate output still uses one dump, refine range, and split;
 -   mixed-output failure removes the entire output set;
+-   `--abort-on-skip` retains clean separate outputs and omits only affected
+    tracks;
+-   `--abort-on-skip --single-file` rejects the entire combined output;
 -   `--single-file` ranges produce one `track.wav`;
 -   default ranges produce correctly bounded `trackNN.wav` files;
 -   insufficient split data;
@@ -485,7 +494,8 @@ Before completing a change, verify:
 -   [ ] SCSI/C2 integrity is independent of partial split completeness;
 -   [ ] refine runs only when SCSI/C2 require it;
 -   [ ] refine is restricted to the partial physical range;
--   [ ] unresolved SCSI/C2 follows the selected default or abort policy;
+-   [ ] unresolved SCSI/C2 follows the selected default, per-track abort, or
+        single-file abort policy;
 -   [ ] output PCM payload is exactly `length * 2352` bytes;
 -   [ ] data output begins at INDEX 01 and contains 2048-byte sectors;
 -   [ ] ISO output is validated and trimmed to its ISO9660 volume size;

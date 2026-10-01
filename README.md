@@ -21,7 +21,8 @@ mixed audio/data ranges when requested.
     combined WAV output and customizable filenames.
 -   Optionally extracts data tracks as validated, mountable `trackNN.iso` files.
 -   Verifies selected audio tracks against the AccurateRip database by default.
--   Refines errors and supports strict abort-on-error behavior.
+-   Refines errors and can omit only affected per-track outputs when strict
+    abort-on-error behavior is requested.
 
 ## Requirements
 
@@ -142,6 +143,12 @@ or failure:
 redumper-cdda /dev/sg4 2 --quiet
 ```
 
+Use `-X` or `--abort-on-skip` to prevent unresolved SCSI/C2 errors from being
+written. In the default separate-file mode, clean tracks are retained and only
+affected track files are omitted; the command exits nonzero to report the
+omissions. With `--single-file`, any unresolved SCSI/C2 error rejects the one
+combined output, so no output file is created.
+
 By default, the script calculates ARv1 and ARv2 checksums with ARver and
 compares selected audio tracks with the AccurateRip database automatically:
 
@@ -167,7 +174,8 @@ Each run creates a unique temporary workspace for redumper's dump, state,
 BIN, and CUE files. The workspace is removed after success, failure, or
 interruption. Completed WAV and ISO files are written outside that workspace.
 They are first written to temporary sibling files and committed only after
-the entire output set succeeds.
+the entire permitted output set succeeds. With `--abort-on-skip`, tracks that
+contain unresolved SCSI/C2 errors are excluded from that set.
 
 For every audio track, the default output is `trackNN.wav`. With
 `--single-file`, a multi-track range defaults to `track.wav`. Use

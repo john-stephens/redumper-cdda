@@ -424,6 +424,84 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             )
         )
 
+    def test_split_write_offsets_parse_constant_and_shifted(self):
+        self.assertEqual(
+            self.module.parse_split_write_offsets(
+                "disc write offset: +48\n"
+            ),
+            [(0, 48)],
+        )
+        self.assertEqual(
+            self.module.parse_split_write_offsets(
+                "disc write offset: -12\n\n"
+                "offset shift correction applied:\n"
+                "  LBA:      0, offset: -12\n"
+                "  LBA:   1000, offset: +576\n\n"
+            ),
+            [(0, -12), (1000, 576)],
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "offset-shift boundaries",
+        ):
+            self.module.parse_split_write_offsets(
+                "disc write offset: +48\n"
+                "offset shift correction applied:\n"
+                "  changed format\n"
+            )
+
+    def test_track_media_errors_use_logical_ranges_and_write_offset(self):
+        tracks = [
+            {
+                "number": 1,
+                "begin": 10,
+                "end": 12,
+                "length": 2,
+            },
+            {
+                "number": 2,
+                "begin": 12,
+                "end": 14,
+                "length": 2,
+            },
+        ]
+        offset = 48
+        first_sample = (
+            (tracks[0]["begin"] - self.module.REDUMPER_LBA_START)
+            * self.module.SAMPLES_PER_SECTOR
+            + offset
+        )
+        states = bytearray(
+            [self.module.REDUMPER_MAX_STATE]
+            * (4 * self.module.SAMPLES_PER_SECTOR)
+        )
+        states[self.module.SAMPLES_PER_SECTOR] = (
+            self.module.REDUMPER_ERROR_SKIP
+        )
+        states[2 * self.module.SAMPLES_PER_SECTOR] = (
+            self.module.REDUMPER_ERROR_C2
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "disc.state"
+            with state_path.open("wb") as state_file:
+                state_file.seek(first_sample)
+                state_file.write(states)
+
+            result = self.module.inspect_track_media_errors(
+                state_path,
+                tracks,
+                [(0, offset)],
+            )
+
+        self.assertEqual(result[1]["SCSI"], 1)
+        self.assertEqual(result[1]["C2"], 0)
+        self.assertEqual(result[1]["SCSI sectors"], 1)
+        self.assertEqual(result[2]["SCSI"], 0)
+        self.assertEqual(result[2]["C2"], 1)
+        self.assertEqual(result[2]["C2 sectors"], 1)
+
     def make_mmc_toc_response(
         self,
         descriptors,
@@ -1983,10 +2061,6 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                 ) as run_capture,
                 mock.patch.object(
                     self.module,
-                    "run_command",
-                ) as run_split,
-                mock.patch.object(
-                    self.module,
                     "identify_generated_audio_segments",
                     return_value=([], workdir / "disc.cue", 0),
                 ) as identify,
@@ -2003,10 +2077,183 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                     workdir,
                 )
 
-            self.assertEqual(run_capture.call_count, 1)
-            self.assertEqual(run_split.call_count, 1)
+            self.assertEqual(run_capture.call_count, 2)
             self.assertEqual(identify.call_count, 2)
             self.assertEqual(write_wav.call_count, 2)
+
+    def test_abort_on_skip_keeps_clean_separate_tracks(self):
+        tracks = self.make_range_tracks()[:2]
+
+        for track in tracks:
+            track["kind"] = "audio"
+
+        with tempfile.TemporaryDirectory() as directory:
+            workdir = Path(directory)
+            output_jobs = self.module.build_output_jobs(
+                tracks,
+                False,
+                output_directory=workdir,
+            )
+            args = Namespace(
+                abort_on_skip=True,
+                device="/dev/sg-test",
+                include_data=False,
+                output=None,
+                prefix="track",
+                quiet=True,
+                refine_passes=0,
+                retries=100,
+                single_file=False,
+                track=self.module.parse_track_selection("1-2"),
+                verbose=False,
+            )
+            dirty_output = (
+                "media errors:\n"
+                "  SCSI: 1 samples\n"
+                "  C2: 2 samples\n"
+                "  Q: 0\n"
+            )
+            split_output = "disc write offset: +48\n"
+            per_track_errors = {
+                1: {
+                    "SCSI": 0,
+                    "C2": 0,
+                    "SCSI sectors": 0,
+                    "C2 sectors": 0,
+                },
+                2: {
+                    "SCSI": 1,
+                    "C2": 2,
+                    "SCSI sectors": 1,
+                    "C2 sectors": 1,
+                },
+            }
+
+            with (
+                mock.patch.object(
+                    self.module,
+                    "read_disc_layout",
+                    return_value=tracks,
+                ),
+                mock.patch.object(
+                    self.module,
+                    "build_output_jobs",
+                    return_value=output_jobs,
+                ),
+                mock.patch.object(
+                    self.module,
+                    "run_command_capture",
+                    side_effect=[
+                        (0, dirty_output),
+                        (0, split_output),
+                    ],
+                ) as run_capture,
+                mock.patch.object(
+                    self.module,
+                    "inspect_track_media_errors",
+                    return_value=per_track_errors,
+                ),
+                mock.patch.object(
+                    self.module,
+                    "identify_generated_audio_segments",
+                    return_value=([], workdir / "disc.cue", 0),
+                ) as identify,
+                mock.patch.object(
+                    self.module,
+                    "segments_to_wav",
+                    side_effect=lambda _segments, path, _sectors, **_kwargs: (
+                        path.write_bytes(b"wav")
+                    ),
+                ) as write_wav,
+                self.assertRaisesRegex(
+                    SystemExit,
+                    "Clean track files were retained",
+                ),
+            ):
+                self.module.extract_track(
+                    args,
+                    workdir,
+                )
+
+            self.assertEqual(run_capture.call_count, 2)
+            identify.assert_called_once()
+            write_wav.assert_called_once()
+            self.assertEqual(
+                (workdir / "track01.wav").read_bytes(),
+                b"wav",
+            )
+            self.assertFalse(
+                (workdir / "track02.wav").exists()
+            )
+
+    def test_abort_on_skip_single_file_remains_all_or_nothing(self):
+        tracks = self.make_range_tracks()[:2]
+
+        for track in tracks:
+            track["kind"] = "audio"
+
+        with tempfile.TemporaryDirectory() as directory:
+            workdir = Path(directory)
+            output_jobs = self.module.build_output_jobs(
+                tracks,
+                True,
+                output_directory=workdir,
+            )
+            args = Namespace(
+                abort_on_skip=True,
+                device="/dev/sg-test",
+                include_data=False,
+                output=None,
+                prefix="track",
+                quiet=True,
+                refine_passes=0,
+                retries=100,
+                single_file=True,
+                track=self.module.parse_track_selection("1-2"),
+                verbose=False,
+            )
+            dirty_output = (
+                "media errors:\n"
+                "  SCSI: 1 samples\n"
+                "  C2: 0 samples\n"
+                "  Q: 0\n"
+            )
+
+            with (
+                mock.patch.object(
+                    self.module,
+                    "read_disc_layout",
+                    return_value=tracks,
+                ),
+                mock.patch.object(
+                    self.module,
+                    "build_output_jobs",
+                    return_value=output_jobs,
+                ),
+                mock.patch.object(
+                    self.module,
+                    "run_command_capture",
+                    return_value=(0, dirty_output),
+                ) as run_capture,
+                mock.patch.object(
+                    self.module,
+                    "segments_to_wav",
+                ) as write_wav,
+                self.assertRaisesRegex(
+                    SystemExit,
+                    "--single-file",
+                ),
+            ):
+                self.module.extract_track(
+                    args,
+                    workdir,
+                )
+
+            run_capture.assert_called_once()
+            write_wav.assert_not_called()
+            self.assertFalse(
+                (workdir / "track.wav").exists()
+            )
 
     def test_accuraterip_failure_retains_completed_output(self):
         track = self.make_range_tracks()[0]
@@ -2062,10 +2309,6 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                     self.module,
                     "run_command_capture",
                     return_value=(0, clean_output),
-                ),
-                mock.patch.object(
-                    self.module,
-                    "run_command",
                 ),
                 mock.patch.object(
                     self.module,
@@ -2162,10 +2405,6 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                 ) as run_capture,
                 mock.patch.object(
                     self.module,
-                    "run_command",
-                ) as run_split,
-                mock.patch.object(
-                    self.module,
                     "identify_generated_data_track",
                     return_value=data_track,
                 ) as identify_data,
@@ -2194,11 +2433,10 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                     workdir,
                 )
 
-            self.assertEqual(run_capture.call_count, 1)
-            self.assertEqual(run_split.call_count, 1)
+            self.assertEqual(run_capture.call_count, 2)
             self.assertIn(
                 "--filesystem-trim",
-                run_split.call_args.args[0],
+                run_capture.call_args_list[1].args[0],
             )
             identify_data.assert_called_once()
             identify_audio.assert_called_once()

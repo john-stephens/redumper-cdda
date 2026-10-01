@@ -29,6 +29,14 @@ END_PADDING_SECTORS = 1
 # Maximum number of refine passes when SCSI/C2 errors remain.
 DEFAULT_REFINE_PASSES = 3
 
+# redumper stores one byte of state per stereo sample. Its CD
+# image address space begins at -10:00:00, or LBA -45150.
+REDUMPER_LBA_START = -45150
+SAMPLES_PER_SECTOR = 588
+REDUMPER_ERROR_SKIP = 0
+REDUMPER_ERROR_C2 = 1
+REDUMPER_MAX_STATE = 4
+
 
 class TerminationRequested(Exception):
     def __init__(self, signum):
@@ -427,6 +435,177 @@ def should_abort_on_errors(
         abort_on_skip
         and data_errors_present(errors)
     )
+
+
+def parse_split_write_offsets(output):
+    """Return redumper's logical-LBA-to-state sample offsets."""
+
+    disc_matches = re.findall(
+        r"^\s*disc write offset\s*:\s*([+-]?\d+)\s*$",
+        output,
+        re.IGNORECASE | re.MULTILINE,
+    )
+
+    if not disc_matches:
+        raise RuntimeError(
+            "Could not determine redumper's split write offset."
+        )
+
+    lines = output.splitlines()
+    shift_offsets = []
+    shift_marker_found = False
+
+    for index, line in enumerate(lines):
+        if not re.search(
+            r"offset shift correction applied\s*:",
+            line,
+            re.IGNORECASE,
+        ):
+            continue
+
+        shift_marker_found = True
+
+        for offset_line in lines[index + 1:]:
+            match = re.match(
+                r"^\s*LBA\s*:\s*(-?\d+)\s*,\s*"
+                r"offset\s*:\s*([+-]?\d+)\s*$",
+                offset_line,
+                re.IGNORECASE,
+            )
+
+            if match:
+                shift_offsets.append(
+                    (int(match.group(1)), int(match.group(2)))
+                )
+            elif shift_offsets or offset_line.strip():
+                break
+
+        break
+
+    if shift_offsets:
+        if shift_offsets != sorted(shift_offsets):
+            raise RuntimeError(
+                "redumper reported unsorted offset-shift boundaries."
+            )
+        return shift_offsets
+
+    if shift_marker_found:
+        raise RuntimeError(
+            "Could not parse redumper's offset-shift boundaries."
+        )
+
+    return [(0, int(disc_matches[-1]))]
+
+
+def state_offset_for_lba(offsets, lba):
+    offset = offsets[0][1]
+
+    for offset_lba, candidate in offsets:
+        if offset_lba > lba:
+            break
+        offset = candidate
+
+    return offset
+
+
+def inspect_track_media_errors(state_path, tracks, offsets):
+    """Count unresolved redumper states in each logical track range."""
+
+    state_path = Path(state_path)
+
+    if not state_path.is_file():
+        raise RuntimeError(
+            f"redumper state file was not found: {state_path.name}"
+        )
+
+    transition_lbas = [
+        lba
+        for lba, _offset in offsets[1:]
+    ]
+    results = {}
+
+    with state_path.open("rb") as state_file:
+        for track in tracks:
+            lba = track["begin"]
+            logical_end_lba = track["end"]
+            scsi_samples = 0
+            c2_samples = 0
+            scsi_sectors = 0
+            c2_sectors = 0
+
+            while lba < logical_end_lba:
+                next_transition = next(
+                    (
+                        boundary
+                        for boundary in transition_lbas
+                        if boundary > lba
+                    ),
+                    logical_end_lba,
+                )
+                sector_count = min(
+                    1024,
+                    logical_end_lba - lba,
+                    next_transition - lba,
+                )
+                sample_offset = state_offset_for_lba(
+                    offsets,
+                    lba,
+                )
+                file_sample = (
+                    (lba - REDUMPER_LBA_START)
+                    * SAMPLES_PER_SECTOR
+                    + sample_offset
+                )
+
+                if file_sample < 0:
+                    raise RuntimeError(
+                        "redumper state offset precedes the state file."
+                    )
+
+                expected_samples = (
+                    sector_count * SAMPLES_PER_SECTOR
+                )
+                state_file.seek(file_sample)
+                states = state_file.read(expected_samples)
+
+                if len(states) != expected_samples:
+                    raise RuntimeError(
+                        "redumper state file is shorter than the "
+                        "selected logical track range."
+                    )
+
+                if states and max(states) > REDUMPER_MAX_STATE:
+                    raise RuntimeError(
+                        "redumper state file contains an unknown state."
+                    )
+
+                scsi_samples += states.count(REDUMPER_ERROR_SKIP)
+                c2_samples += states.count(REDUMPER_ERROR_C2)
+
+                for sector_start in range(
+                    0,
+                    len(states),
+                    SAMPLES_PER_SECTOR,
+                ):
+                    sector = states[
+                        sector_start:
+                        sector_start + SAMPLES_PER_SECTOR
+                    ]
+                    if REDUMPER_ERROR_SKIP in sector:
+                        scsi_sectors += 1
+                    if REDUMPER_ERROR_C2 in sector:
+                        c2_sectors += 1
+
+                lba += sector_count
+
+            results[track["number"]] = {
+                "SCSI": scsi_samples,
+                "C2": c2_samples,
+                "SCSI sectors": scsi_sectors,
+                "C2 sectors": c2_sectors,
+            }
+
+    return results
 
 
 # ----------------------------------------------------------------------
@@ -2685,9 +2864,9 @@ include data tracks. --single-file cannot combine audio and data tracks.
         "--abort-on-skip",
         action="store_true",
         help=(
-            "Do not create output if SCSI or C2 "
-            "errors remain after refinement "
-            "(default: write output with a warning)"
+            "Skip separate track files with unresolved SCSI/C2 "
+            "errors; --single-file remains all-or-nothing "
+            "(default: write affected output with a warning)"
         ),
     )
 
@@ -3194,9 +3373,12 @@ def extract_track(args, workdir):
         errors
     )
 
-    if should_abort_on_errors(
-        errors,
-        args.abort_on_skip,
+    if (
+        should_abort_on_errors(
+            errors,
+            args.abort_on_skip,
+        )
+        and args.single_file
     ):
         sys.exit(
             "ERROR: SCSI/C2 errors remain after "
@@ -3207,10 +3389,15 @@ def extract_track(args, workdir):
             f"Remaining C2 errors:   "
             f"{errors['C2']}\n"
             "No output file was created because "
-            "--abort-on-skip was specified."
+            "--abort-on-skip was specified with "
+            "--single-file."
         )
 
-    if unresolved_errors and concise:
+    if (
+        unresolved_errors
+        and concise
+        and not args.abort_on_skip
+    ):
         print(
             "Warning: writing output with unresolved "
             f"SCSI={errors['SCSI']}, C2={errors['C2']}"
@@ -3256,24 +3443,88 @@ def extract_track(args, workdir):
         print("Splitting partial dump")
         print("======================")
 
-    try:
-        run_command(
-            split_command,
-            verbose=args.verbose,
-            status_label=(
-                "Splitting"
-                if concise
-                else None
-            ),
+    if concise:
+        print(
+            "Splitting...",
+            end="",
+            flush=True,
         )
 
-    except subprocess.CalledProcessError as exc:
+    split_returncode, split_output = run_command_capture(
+        split_command,
+        verbose=args.verbose,
+    )
+
+    if concise:
+        print(
+            " done"
+            if split_returncode == 0
+            else " failed"
+        )
+
+    if split_returncode != 0:
         sys.exit(
             "ERROR: redumper could not split the "
             "partial dump even with --force-split.\n"
-            f"Exit status: {exc.returncode}\n"
+            f"Exit status: {split_returncode}\n"
             "No output file was created."
         )
+
+    skipped_error_jobs = []
+
+    if (
+        unresolved_errors
+        and args.abort_on_skip
+        and not args.single_file
+    ):
+        try:
+            write_offsets = parse_split_write_offsets(
+                split_output
+            )
+            per_track_errors = inspect_track_media_errors(
+                workdir / f"{image_name}.state",
+                selected_tracks,
+                write_offsets,
+            )
+        except RuntimeError as exc:
+            sys.exit(
+                f"ERROR: {exc}\n"
+                "Could not safely identify which track outputs "
+                "contain unresolved SCSI/C2 errors.\n"
+                "No output file was created."
+            )
+
+        clean_output_jobs = []
+
+        for job in output_jobs:
+            track_errors = per_track_errors[
+                job["track"]["number"]
+            ]
+
+            if data_errors_present(track_errors):
+                job["media_errors"] = track_errors
+                skipped_error_jobs.append(job)
+            else:
+                clean_output_jobs.append(job)
+
+        output_jobs = clean_output_jobs
+
+        if not args.quiet:
+            for job in skipped_error_jobs:
+                track_errors = job["media_errors"]
+                print(
+                    f"Skipping Track {job['track']['number']:02d}: "
+                    f"SCSI={track_errors['SCSI']} samples in "
+                    f"{track_errors['SCSI sectors']} sectors, "
+                    f"C2={track_errors['C2']} samples in "
+                    f"{track_errors['C2 sectors']} sectors"
+                )
+
+        if not output_jobs:
+            sys.exit(
+                "ERROR: every selected track contains unresolved "
+                "SCSI/C2 errors; no output file was created."
+            )
 
     # --------------------------------------------------------------
     # Locate split audio and data tracks.
@@ -3514,9 +3765,28 @@ def extract_track(args, workdir):
                 "(SCSI=0, C2=0)"
             )
     elif concise:
-        print(
-            f"Done. SCSI={errors['SCSI']}, "
-            f"C2={errors['C2']}, Q={errors['Q']}"
+        if skipped_error_jobs:
+            print(
+                f"Done with {len(skipped_error_jobs)} "
+                f"track{'' if len(skipped_error_jobs) == 1 else 's'} "
+                "omitted due to unresolved SCSI/C2 errors."
+            )
+        else:
+            print(
+                f"Done. SCSI={errors['SCSI']}, "
+                f"C2={errors['C2']}, Q={errors['Q']}"
+            )
+
+    if skipped_error_jobs:
+        skipped_tracks = ", ".join(
+            f"{job['track']['number']:02d}"
+            for job in skipped_error_jobs
+        )
+        sys.exit(
+            "ERROR: --abort-on-skip omitted output for "
+            f"Track{'' if len(skipped_error_jobs) == 1 else 's'} "
+            f"{skipped_tracks} because unresolved SCSI/C2 errors "
+            "remain. Clean track files were retained."
         )
 
 
