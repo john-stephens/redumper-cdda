@@ -163,12 +163,14 @@ console parsing if one can be validated.
 
 ## AccurateRip verification
 
-`--accuraterip` is an optional post-extraction check implemented with the
-[ARver](https://pypi.org/project/ARver/) Python library. The complete reconciled
-MMC layout supplies all track offsets and lead-out for the AccurateRip disc ID,
-while checksums are calculated only for selected audio tracks. Combined output
-is temporarily separated at the already established logical boundaries for
-checksumming; this does not trigger another redumper dump or split.
+AccurateRip is a post-extraction check implemented with the
+[ARver](https://pypi.org/project/ARver/) Python library. It runs by default when
+ARver and its runtime dependencies are installed, and can be disabled with
+`--no-accuraterip`. The complete reconciled MMC layout supplies all track
+offsets and lead-out for the AccurateRip disc ID, while checksums are calculated
+only for selected audio tracks. Combined output is temporarily separated at the
+already established logical boundaries for checksumming; this does not trigger
+another redumper dump or split.
 
 ARv2 matches are preferred, with ARv1 used as a fallback. Report the matching
 version, checksum, and database confidence for each selected audio track.
@@ -178,7 +180,7 @@ checksummed.
 AccurateRip is independent corroboration, not a replacement for redumper's
 SCSI/C2 status. A database miss, lookup failure, or checksum mismatch must not
 delete successfully completed output. Unsupported audio/data layouts fail
-before acquisition when verification is requested.
+before acquisition when verification is active.
 
 ## Empirical validation
 

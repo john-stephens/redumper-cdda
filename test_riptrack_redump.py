@@ -1198,6 +1198,119 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             [{"start": None, "end": None}],
         )
 
+    def test_accuraterip_defaults_on_when_arver_is_available(self):
+        arguments = [
+            str(SCRIPT_PATH),
+            "/dev/sg-test",
+            "2",
+        ]
+        enabled = []
+
+        def extract_track(args, _workdir):
+            enabled.append(args.accuraterip)
+
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                arguments,
+            ),
+            mock.patch.object(
+                self.module.shutil,
+                "which",
+                return_value="/mock/tool",
+            ),
+            mock.patch.object(
+                self.module,
+                "load_accuraterip_library",
+                return_value={},
+            ) as load_library,
+            mock.patch.object(
+                self.module,
+                "extract_track",
+                side_effect=extract_track,
+            ),
+        ):
+            self.module.main()
+
+        load_library.assert_called_once_with()
+        self.assertEqual(enabled, [True])
+
+    def test_missing_arver_disables_accuraterip(self):
+        arguments = [
+            str(SCRIPT_PATH),
+            "/dev/sg-test",
+            "2",
+        ]
+        enabled = []
+
+        def extract_track(args, _workdir):
+            enabled.append(args.accuraterip)
+
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                arguments,
+            ),
+            mock.patch.object(
+                self.module.shutil,
+                "which",
+                return_value="/mock/tool",
+            ),
+            mock.patch.object(
+                self.module,
+                "load_accuraterip_library",
+                side_effect=RuntimeError("ARver is unavailable"),
+            ),
+            mock.patch.object(
+                self.module,
+                "extract_track",
+                side_effect=extract_track,
+            ),
+        ):
+            self.module.main()
+
+        self.assertEqual(enabled, [False])
+
+    def test_no_accuraterip_disables_library_probe(self):
+        arguments = [
+            str(SCRIPT_PATH),
+            "/dev/sg-test",
+            "2",
+            "--no-accuraterip",
+        ]
+        enabled = []
+
+        def extract_track(args, _workdir):
+            enabled.append(args.accuraterip)
+
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                arguments,
+            ),
+            mock.patch.object(
+                self.module.shutil,
+                "which",
+                return_value="/mock/tool",
+            ),
+            mock.patch.object(
+                self.module,
+                "load_accuraterip_library",
+            ) as load_library,
+            mock.patch.object(
+                self.module,
+                "extract_track",
+                side_effect=extract_track,
+            ),
+        ):
+            self.module.main()
+
+        load_library.assert_not_called()
+        self.assertEqual(enabled, [False])
+
     def test_help_explains_track_selection(self):
         output = io.StringIO()
         arguments = [
@@ -1241,7 +1354,8 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             "Use --include-data",
             rendered,
         )
-        self.assertIn("--accuraterip", rendered)
+        self.assertIn("--no-accuraterip", rendered)
+        self.assertNotIn("\n  --accuraterip", rendered)
 
     def test_accuraterip_disc_id_uses_complete_mmc_layout(self):
         tracks = [

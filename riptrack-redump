@@ -2721,11 +2721,13 @@ include data tracks. Mixed or multi-track data selections require --batch.
     )
 
     parser.add_argument(
-        "--accuraterip",
-        action="store_true",
+        "--no-accuraterip",
+        dest="accuraterip",
+        action="store_false",
+        default=True,
         help=(
-            "Verify selected audio tracks with the AccurateRip "
-            "database using ARver (default: disabled)"
+            "Disable AccurateRip verification "
+            "(default: enabled when ARver is installed)"
         ),
     )
 
@@ -2767,10 +2769,8 @@ include data tracks. Mixed or multi-track data selections require --batch.
     if args.accuraterip and not args.show_layout:
         try:
             load_accuraterip_library()
-        except RuntimeError as exc:
-            sys.exit(
-                f"ERROR: {exc}"
-            )
+        except RuntimeError:
+            args.accuraterip = False
 
     if (
         args.include_data
