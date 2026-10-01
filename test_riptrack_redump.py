@@ -1356,6 +1356,9 @@ class TemporaryWorkspaceTests(unittest.TestCase):
         )
         self.assertIn("--no-accuraterip", rendered)
         self.assertNotIn("\n  --accuraterip", rendered)
+        self.assertIn("-s, --single-file", rendered)
+        self.assertIn("-p, --prefix PREFIX", rendered)
+        self.assertNotIn("--batch", rendered)
 
     def test_accuraterip_disc_id_uses_complete_mmc_layout(self):
         tracks = [
@@ -1574,13 +1577,12 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             },
         )
 
-    def test_argparse_accepts_include_data_batch_range(self):
+    def test_argparse_defaults_to_separate_include_data_files(self):
         arguments = [
             str(SCRIPT_PATH),
             "/dev/sg-test",
             "1-3",
             "--include-data",
-            "--batch",
         ]
         parsed = []
 
@@ -1588,7 +1590,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             parsed.append(
                 (
                     args.include_data,
-                    args.batch,
+                    args.single_file,
                 )
             )
 
@@ -1611,14 +1613,15 @@ class TemporaryWorkspaceTests(unittest.TestCase):
         ):
             self.module.main()
 
-        self.assertEqual(parsed, [(True, True)])
+        self.assertEqual(parsed, [(True, False)])
 
-    def test_argparse_rejects_include_data_range_without_batch(self):
+    def test_argparse_rejects_mixed_range_as_single_file(self):
         arguments = [
             str(SCRIPT_PATH),
             "/dev/sg-test",
             "1-3",
             "--include-data",
+            "--single-file",
         ]
 
         with (
@@ -1643,7 +1646,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             jobs = self.module.build_output_jobs(
                 tracks,
-                False,
+                True,
                 output_directory=directory,
             )
 
@@ -1657,7 +1660,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                 300,
             )
 
-    def test_batch_range_uses_track_numbered_wavs(self):
+    def test_default_range_uses_track_numbered_wavs(self):
         tracks = self.module.resolve_track_selection(
             self.make_range_tracks(),
             self.module.parse_track_selection("1-3"),
@@ -1666,7 +1669,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             jobs = self.module.build_output_jobs(
                 tracks,
-                True,
+                False,
                 output_directory=directory,
             )
 
@@ -1682,6 +1685,76 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                 [job["expected_sectors"] for job in jobs],
                 [100, 100, 100],
             )
+
+    def test_custom_prefix_applies_to_separate_outputs(self):
+        tracks = self.make_range_tracks()[:2]
+        tracks[1]["kind"] = "data"
+
+        with tempfile.TemporaryDirectory() as directory:
+            jobs = self.module.build_output_jobs(
+                tracks,
+                False,
+                output_directory=directory,
+                prefix="album-",
+            )
+
+        self.assertEqual(
+            [job["output_path"].name for job in jobs],
+            ["album-01.wav", "album-02.iso"],
+        )
+
+    def test_custom_prefix_applies_to_combined_output(self):
+        tracks = self.make_range_tracks()[:2]
+
+        with tempfile.TemporaryDirectory() as directory:
+            jobs = self.module.build_output_jobs(
+                tracks,
+                True,
+                output_directory=directory,
+                prefix="album",
+            )
+
+        self.assertEqual(
+            jobs[0]["output_path"].name,
+            "album.wav",
+        )
+
+    def test_short_single_file_and_prefix_options(self):
+        arguments = [
+            str(SCRIPT_PATH),
+            "/dev/sg-test",
+            "1-3",
+            "-s",
+            "-p",
+            "album",
+        ]
+        parsed = []
+
+        def extract_track(args, _workdir):
+            parsed.append(
+                (args.single_file, args.prefix)
+            )
+
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                arguments,
+            ),
+            mock.patch.object(
+                self.module.shutil,
+                "which",
+                return_value="/mock/tool",
+            ),
+            mock.patch.object(
+                self.module,
+                "extract_track",
+                side_effect=extract_track,
+            ),
+        ):
+            self.module.main()
+
+        self.assertEqual(parsed, [(True, "album")])
 
     def test_include_data_range_selects_audio_and_data(self):
         tracks = self.make_range_tracks()[:3]
@@ -1700,7 +1773,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             [1, 2, 3],
         )
 
-    def test_mixed_batch_uses_wav_and_iso_names(self):
+    def test_mixed_default_uses_wav_and_iso_names(self):
         tracks = self.make_range_tracks()[:3]
         tracks[0]["kind"] = "data"
         tracks[1]["kind"] = "audio"
@@ -1709,7 +1782,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             jobs = self.module.build_output_jobs(
                 tracks,
-                True,
+                False,
                 output_directory=directory,
             )
 
@@ -1733,7 +1806,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             jobs = self.module.build_output_jobs(
                 [track],
-                False,
+                True,
                 output_directory=directory,
             )
 
@@ -1743,7 +1816,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             )
             self.assertEqual(jobs[0]["kind"], "data")
 
-    def test_include_data_without_batch_requires_data_track(self):
+    def test_include_data_single_file_requires_data_track(self):
         track = self.make_range_tracks()[0]
         track["kind"] = "audio"
 
@@ -1754,10 +1827,10 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             self.module.validate_data_output_mode(
                 [track],
                 include_data=True,
-                batch=False,
+                single_file=True,
             )
 
-    def test_output_failure_removes_entire_batch(self):
+    def test_output_failure_removes_entire_output_set(self):
         with tempfile.TemporaryDirectory() as directory:
             output_directory = Path(directory)
             jobs = []
@@ -1846,7 +1919,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                 [90, 100, 100, 10],
             )
 
-    def test_batch_range_uses_one_dump_and_one_split(self):
+    def test_separate_range_uses_one_dump_and_one_split(self):
         tracks = self.make_range_tracks()[:2]
 
         for track in tracks:
@@ -1869,13 +1942,14 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             ]
             args = Namespace(
                 abort_on_skip=False,
-                batch=True,
                 device="/dev/sg-test",
                 include_data=False,
                 output=None,
+                prefix="track",
                 quiet=True,
                 refine_passes=3,
                 retries=100,
+                single_file=False,
                 track=self.module.parse_track_selection(
                     "1-2"
                 ),
@@ -1952,13 +2026,14 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             args = Namespace(
                 abort_on_skip=False,
                 accuraterip=True,
-                batch=False,
                 device="/dev/sg-test",
                 include_data=False,
                 output=None,
+                prefix="track",
                 quiet=True,
                 refine_passes=3,
                 retries=100,
+                single_file=True,
                 track=self.module.parse_track_selection("1"),
                 verbose=False,
             )
@@ -2023,7 +2098,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                 b"wav",
             )
 
-    def test_mixed_batch_uses_one_dump_and_transactional_outputs(self):
+    def test_mixed_output_uses_one_dump_and_transactional_files(self):
         tracks = self.make_range_tracks()[:2]
         tracks[0]["kind"] = "data"
         tracks[1]["kind"] = "audio"
@@ -2032,18 +2107,19 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             workdir = Path(directory)
             output_jobs = self.module.build_output_jobs(
                 tracks,
-                True,
+                False,
                 output_directory=workdir,
             )
             args = Namespace(
                 abort_on_skip=False,
-                batch=True,
                 device="/dev/sg-test",
                 include_data=True,
                 output=None,
+                prefix="track",
                 quiet=True,
                 refine_passes=3,
                 retries=100,
+                single_file=False,
                 track=self.module.parse_track_selection(
                     "1-2"
                 ),

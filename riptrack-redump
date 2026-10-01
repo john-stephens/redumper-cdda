@@ -1104,11 +1104,11 @@ def format_track_numbers(selected_tracks):
 def validate_data_output_mode(
     selected_tracks,
     include_data,
-    batch,
+    single_file,
 ):
     if (
         include_data
-        and not batch
+        and single_file
         and (
             len(selected_tracks) != 1
             or selected_tracks[0].get(
@@ -1118,7 +1118,7 @@ def validate_data_output_mode(
         )
     ):
         raise RuntimeError(
-            "Without --batch, --include-data requires one "
+            "With --single-file, --include-data requires one "
             "explicit data track."
         )
 
@@ -1423,9 +1423,10 @@ def print_accuraterip_report(report, verbose=False):
 
 def build_output_jobs(
     selected_tracks,
-    batch,
+    single_file,
     output=None,
     output_directory=None,
+    prefix="track",
 ):
     directory = (
         Path.cwd()
@@ -1433,7 +1434,7 @@ def build_output_jobs(
         else Path(output_directory)
     )
 
-    if batch:
+    if not single_file:
         return [
             {
                 "track": track,
@@ -1447,9 +1448,9 @@ def build_output_jobs(
                 "output_path": (
                     directory
                     / (
-                        f"track{track['number']:02d}.iso"
+                        f"{prefix}{track['number']:02d}.iso"
                         if track.get("kind", "audio") == "data"
-                        else f"track{track['number']:02d}.wav"
+                        else f"{prefix}{track['number']:02d}.wav"
                     )
                 ).resolve(),
             }
@@ -1467,7 +1468,7 @@ def build_output_jobs(
     ):
         raise RuntimeError(
             "Data tracks can only be combined with other "
-            "tracks in batch mode."
+            "tracks as separate files."
         )
 
     if first_track.get("kind", "audio") == "data":
@@ -1476,7 +1477,7 @@ def build_output_jobs(
             if output is not None
             else (
                 directory
-                / f"track{first_track['number']:02d}.iso"
+                / f"{prefix}{first_track['number']:02d}.iso"
             ).resolve()
         )
         return [
@@ -1499,9 +1500,9 @@ def build_output_jobs(
         else (
             directory
             / (
-                f"track{first_track['number']:02d}.wav"
+                f"{prefix}{first_track['number']:02d}.wav"
                 if len(selected_tracks) == 1
-                else "track.wav"
+                else f"{prefix}.wav"
             )
         ).resolve()
     )
@@ -2629,7 +2630,7 @@ explicitly with 0 or a range such as 0-3.
 
 By default, open ranges omit data tracks. A single N or fully bounded N-M
 selection fails if it explicitly names a data track. Use --include-data to
-include data tracks. Mixed or multi-track data selections require --batch.
+include data tracks. --single-file cannot combine audio and data tracks.
 """,
     )
 
@@ -2653,8 +2654,8 @@ include data tracks. Mixed or multi-track data selections require --batch.
         "--output",
         type=Path,
         help=(
-            "Non-batch output path (default: ./trackNN.wav, "
-            "./track.wav, or ./trackNN.iso according to selection)"
+            "Output path for --single-file "
+            "(default: ./PREFIX.wav or ./PREFIXNN.ext)"
         ),
     )
 
@@ -2691,12 +2692,23 @@ include data tracks. Mixed or multi-track data selections require --batch.
     )
 
     parser.add_argument(
-        "-B",
-        "--batch",
+        "-s",
+        "--single-file",
         action="store_true",
         help=(
-            "Write one trackNN.wav or trackNN.iso per selected track "
-            "(default: one combined audio WAV)"
+            "Combine selected audio tracks into one PREFIX.wav "
+            "(default: one PREFIXNN.wav or PREFIXNN.iso per track)"
+        ),
+    )
+
+    parser.add_argument(
+        "-p",
+        "--prefix",
+        default="track",
+        metavar="PREFIX",
+        help=(
+            "Prefix for automatically named output files "
+            "(default: track)"
         ),
     )
 
@@ -2705,8 +2717,8 @@ include data tracks. Mixed or multi-track data selections require --batch.
         "--include-data",
         action="store_true",
         help=(
-            "Include data tracks as trackNN.iso; requires --batch "
-            "unless TRACK is one explicit data track "
+            "Include data tracks as PREFIXNN.iso; incompatible with "
+            "--single-file unless TRACK is one explicit data track "
             "(default: omit data tracks)"
         ),
     )
@@ -2766,6 +2778,16 @@ include data tracks. Mixed or multi-track data selections require --batch.
             "ERROR: invalid refine-pass count"
         )
 
+    if (
+        not args.prefix
+        or args.prefix in (".", "..")
+        or Path(args.prefix).name != args.prefix
+    ):
+        parser.error(
+            "--prefix must be a non-empty filename prefix "
+            "without directory components"
+        )
+
     if args.accuraterip and not args.show_layout:
         try:
             load_accuraterip_library()
@@ -2775,7 +2797,7 @@ include data tracks. Mixed or multi-track data selections require --batch.
     if (
         args.include_data
         and not args.show_layout
-        and not args.batch
+        and args.single_file
         and (
             args.track["start"] is None
             or args.track["end"] is None
@@ -2784,7 +2806,7 @@ include data tracks. Mixed or multi-track data selections require --batch.
         )
     ):
         parser.error(
-            "--include-data requires --batch for a track range"
+            "--include-data cannot use --single-file for a track range"
         )
 
     if shutil.which(
@@ -2818,11 +2840,10 @@ include data tracks. Mixed or multi-track data selections require --batch.
             )
         return
 
-    if args.batch and args.output:
+    if not args.single_file and args.output:
         parser.error(
-            "--output cannot be used with --batch; batch files "
-            "are named trackNN.wav or trackNN.iso in the "
-            "current directory"
+            "--output requires --single-file; separate files use "
+            "PREFIXNN.wav or PREFIXNN.iso in the current directory"
         )
 
     if shutil.which(
@@ -2880,7 +2901,7 @@ def extract_track(args, workdir):
         validate_data_output_mode(
             selected_tracks,
             args.include_data,
-            args.batch,
+            args.single_file,
         )
 
         if getattr(
@@ -2958,8 +2979,9 @@ def extract_track(args, workdir):
 
     output_jobs = build_output_jobs(
         selected_tracks,
-        args.batch,
+        args.single_file,
         output=args.output,
+        prefix=args.prefix,
     )
 
     output_paths = [
@@ -2982,9 +3004,9 @@ def extract_track(args, workdir):
             f"{logical_end_lba - 1}"
         )
 
-        if args.batch:
+        if not args.single_file:
             print(
-                f"Output: {len(output_paths)} batch files"
+                f"Output: {len(output_paths)} separate files"
             )
         else:
             print(
@@ -3340,7 +3362,7 @@ def extract_track(args, workdir):
             print(
                 (
                     f"Writing {len(output_jobs)} output files..."
-                    if args.batch
+                    if not args.single_file
                     else (
                         "Writing ISO..."
                         if output_jobs[0]["kind"] == "data"

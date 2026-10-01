@@ -52,6 +52,12 @@ selected track's file-relative INDEX 01. The script starts there, then
 consumes subsequent AUDIO BINs from sector zero until exactly
 `cdparanoia`'s reported track length has been collected.
 
+Output packaging does not change acquisition. By default, each selected track
+is written separately as `PREFIXNN.wav` or `PREFIXNN.iso`. `--single-file`
+combines a multi-track audio selection into `PREFIX.wav`; it does not trigger
+another dump, refine, or split. The default prefix is `track` and `--prefix`
+changes it.
+
 When data output is requested, splitting also uses `--filesystem-trim`. The
 selected data BIN begins at its CUE `INDEX 01`, excluding its INDEX 00 pregap.
 Raw `MODE1/2352` sectors are reduced to their 2048-byte user payload;

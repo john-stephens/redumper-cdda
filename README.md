@@ -17,7 +17,8 @@ mixed audio/data ranges when requested.
 
 -   Extracts one track or a contiguous track range with a single redumper dump.
 -   Supports hidden audio in Track 0 when a positive Track 1 pregap exists.
--   Produces combined WAV output or batch-split `trackNN.wav` files.
+-   Produces one numbered WAV or ISO per track by default, with optional
+    combined WAV output and customizable filenames.
 -   Optionally extracts data tracks as validated, mountable `trackNN.iso` files.
 -   Automatically verifies selected audio tracks against the AccurateRip
     database when ARver is installed.
@@ -76,32 +77,41 @@ Track 1 is data, `-3` extracts audio Tracks 2 and 3, while `1-3` fails.
 The physical range is still read once; data-track payload is excluded
 when the AUDIO segments are assembled into WAV output.
 
-Use `-d` or `--include-data` to include data tracks. Mixed or multi-track
-selections containing data require `-B`/`--batch`; one explicitly named data
-track may be extracted without batch mode:
+Use `-d` or `--include-data` to include data tracks. The default separate-file
+mode supports mixed or multi-track selections containing data. One explicitly
+named data track may also be extracted with `--single-file`:
 
 ``` bash
 ./riptrack-redump /dev/sg4 1 --include-data
-./riptrack-redump /dev/sg4 1-3 --include-data --batch
-./riptrack-redump /dev/sg4 -3 -d -B
-./riptrack-redump /dev/sg4 -d -B  # Full disc, including data tracks
+./riptrack-redump /dev/sg4 1-3 --include-data
+./riptrack-redump /dev/sg4 -3 -d
+./riptrack-redump /dev/sg4 -d  # Full disc, including data tracks
 ```
 
 With `--include-data`, ranges include both audio and data tracks. Audio files
-are named `trackNN.wav` and data files are named `trackNN.iso`. Without this
-option, the established audio-only range rules remain unchanged.
+are named `PREFIXNN.wav` and data files are named `PREFIXNN.iso`, where the
+default prefix is `track`. Without this option, the established audio-only
+range rules remain unchanged.
 
-By default, a multi-track range is written as one `track.wav`. Use
-`-B` or `--batch` to package the same single dump as separate
-`trackNN.wav` files at the logical track boundaries:
+By default, each selected track is written separately as `trackNN.wav` or
+`trackNN.iso`. Use `-s` or `--single-file` to combine a multi-track audio range
+into one `track.wav` while retaining the same single dump:
 
 ``` bash
-./riptrack-redump /dev/sg4 1-3 --batch
+./riptrack-redump /dev/sg4 1-3 --single-file
 ```
 
-`--output=PATH` sets the non-batch output filename and cannot be used with
-`--batch`. It applies to a combined audio WAV, a single audio track, or a
-single explicitly selected data-track ISO.
+`--output=PATH` sets the `--single-file` output filename. It applies to a
+combined audio WAV, a single audio track, or a single explicitly selected
+data-track ISO.
+
+Use `-p` or `--prefix` to replace the default `track` prefix on automatically
+named files:
+
+``` bash
+./riptrack-redump /dev/sg4 1-3 --prefix album
+# Writes album01.wav, album02.wav, and album03.wav
+```
 
 Normal output is concise, with a track summary and single-line progress
 showing the current track and percentage during dumping and refinement.
@@ -125,7 +135,7 @@ When ARver is installed, the script calculates ARv1 and ARv2 checksums and
 compares selected audio tracks with the AccurateRip database automatically:
 
 ``` bash
-./riptrack-redump /dev/sg4 --batch
+./riptrack-redump /dev/sg4
 ./riptrack-redump /dev/sg4 2
 ```
 
@@ -148,12 +158,12 @@ interruption. Completed WAV and ISO files are written outside that workspace.
 They are first written to temporary sibling files and committed only after
 the entire output set succeeds.
 
-For a single track, the default output is `trackNN.wav`; for a
-multi-track range, it is `track.wav`. Use `--output=PATH` to choose a
-different non-batch filename and location.
+For every audio track, the default output is `trackNN.wav`. With
+`--single-file`, a multi-track range defaults to `track.wav`. Use
+`--output=PATH` to choose a different single-file name and location.
 
 For one data track selected with `--include-data`, the default output is
-`trackNN.iso`.
+`trackNN.iso`, or `PREFIXNN.iso` when `--prefix` is used.
 
 To inspect the complete audio/data track layout without dumping anything,
 omit the track number and use:

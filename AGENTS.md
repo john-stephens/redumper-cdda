@@ -83,10 +83,10 @@ must itself be audio. Thus, with data Track 1, `-3` selects audio Tracks
 2 and 3 while `1-3` fails.
 
 When `-d` or `--include-data` is active, resolve the selection against the
-full MMC layout and include both audio and data tracks. Mixed or multi-track
-data selection requires `-B`/`--batch`. Without batch mode,
-`--include-data` is valid only for one explicit data-track number. Track 0
-remains audio-only and is valid only when Track 1 is audio.
+full MMC layout and include both audio and data tracks. The default separate
+output mode supports mixed or multi-track data selections. With `-s` or
+`--single-file`, `--include-data` is valid only for one explicit data-track
+number. Track 0 remains audio-only and is valid only when Track 1 is audio.
 
 For a resolved contiguous selection:
 
@@ -103,16 +103,16 @@ the same entire range for refinement. Never implement ranges as one
 redumper dump per track. A physical range may cross omitted data tracks;
 do not include their payload when assembling WAV output.
 
-Without `--batch`, a multi-track range produces one `track.wav`. With
-`-B` or `--batch`, split the already dumped range at the established
-logical track boundaries and write `trackNN.wav` files. Batch mode is a
-packaging step and must not trigger additional dump, refine, or split
-commands.
+By default, split the already dumped range at the established logical track
+boundaries and write `PREFIXNN.wav` files. With `-s` or `--single-file`, a
+multi-track audio range produces one `PREFIX.wav`. Output packaging must not
+trigger additional dump, refine, or split commands. `-p` or `--prefix` changes
+`PREFIX`, whose default is `track`.
 
-With `--include-data --batch`, write audio tracks as `trackNN.wav` and data
-tracks as `trackNN.iso`. A single explicit data track may produce
-`trackNN.iso` without batch mode. `--output` may override one non-batch output
-but remains incompatible with batch mode.
+With `--include-data`, default separate output writes audio tracks as
+`PREFIXNN.wav` and data tracks as `PREFIXNN.iso`. A single explicit data track
+may produce `PREFIXNN.iso` with `--single-file`. `--output` may override a
+single-file output but is incompatible with the default separate output mode.
 
 ### Data-track ISO semantics
 
@@ -363,9 +363,9 @@ Fail closed and do not leave misleading WAV or ISO output when:
 If output creation has begun when a failure occurs, remove every incomplete
 WAV, ISO, and temporary sibling file.
 
-For batch output, commit final names only after every conversion succeeds. A
-failure or interruption must remove the entire new output set so a partial
-batch is never presented as complete.
+For separate output, commit final names only after every conversion succeeds.
+A failure or interruption must remove the entire new output set so a partial
+set is never presented as complete.
 
 Create redumper's intermediate files in a unique temporary workspace.
 Remove that workspace after success, failure, SIGINT, SIGHUP, or SIGTERM.
@@ -402,16 +402,17 @@ Prefer unit tests for pure parsing/range functions. Cover:
 -   open ranges omit data tracks;
 -   bounded ranges reject explicitly selected data tracks;
 -   `--include-data` ranges select audio and data tracks;
--   non-batch `--include-data` accepts only one explicit data track;
--   mixed batch naming uses `trackNN.wav` and `trackNN.iso`;
+-   `--single-file --include-data` accepts only one explicit data track;
+-   mixed default naming uses `trackNN.wav` and `trackNN.iso`;
+-   custom prefixes apply to automatically named WAV and ISO output;
 -   data CUE parsing starts at INDEX 01;
 -   MODE1/2352 and MODE2/2352 Form 1 payload extraction;
 -   Mode 2 Form 2 and unsupported modes fail closed;
 -   ISO9660 primary-volume validation and exact filesystem trimming;
--   mixed batches still use one dump, refine range, and split;
--   mixed-batch failure removes the entire output set;
--   combined ranges produce one `track.wav`;
--   batch ranges produce correctly bounded `trackNN.wav` files;
+-   mixed separate output still uses one dump, refine range, and split;
+-   mixed-output failure removes the entire output set;
+-   `--single-file` ranges produce one `track.wav`;
+-   default ranges produce correctly bounded `trackNN.wav` files;
 -   insufficient split data;
 -   exact PCM payload size.
 -   AccurateRip disc IDs use the complete MMC layout and lead-out;
@@ -468,7 +469,7 @@ Before completing a change, verify:
 -   [ ] Tracks 1+ begin at the selected Track N INDEX 01;
 -   [ ] Track 0 begins at LBA 0 and ends at Track 1 INDEX 01;
 -   [ ] a range is acquired with one dump over its full physical range;
--   [ ] batch mode only changes WAV/ISO packaging;
+-   [ ] single-file mode only changes WAV/ISO packaging;
 -   [ ] Track N's own pregap is excluded;
 -   [ ] Track N+1's pregap is included;
 -   [ ] final sector count equals cdparanoia length;
