@@ -1360,7 +1360,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
         self.assertIn("--no-accuraterip", rendered)
         self.assertNotIn("\n  --accuraterip", rendered)
         self.assertIn("-s, --single-file", rendered)
-        self.assertIn("-p, --prefix PREFIX", rendered)
+        self.assertIn("--prefix PREFIX", rendered)
         self.assertNotIn("--batch", rendered)
 
     def test_accuraterip_disc_id_uses_complete_mmc_layout(self):
