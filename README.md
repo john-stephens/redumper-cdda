@@ -19,6 +19,7 @@ mixed audio/data ranges when requested.
 -   Supports hidden audio in Track 0 when a positive Track 1 pregap exists.
 -   Produces combined WAV output or batch-split `trackNN.wav` files.
 -   Optionally extracts data tracks as validated, mountable `trackNN.iso` files.
+-   Optionally verifies selected audio tracks against the AccurateRip database.
 -   Refines errors and supports strict abort-on-error behavior.
 
 ## Requirements
@@ -32,6 +33,9 @@ mixed audio/data ranges when requested.
     [drive-support documentation](https://github.com/superg/redumper#drive-support)
     is recommended for accurate CD dumping. The installed redumper executable
     can also list recommended models with `redumper --list-recommended-drives`.
+-   Optional: [ARver](https://pypi.org/project/ARver/) 1.5 or newer and an
+    internet connection for `--accuraterip`. Install the Python dependencies
+    with `python3 -m pip install -r requirements-accuraterip.txt`.
 
 ## Usage
 
@@ -114,6 +118,20 @@ or failure:
 ``` bash
 ./riptrack-redump /dev/sg4 2 --quiet
 ```
+
+Use `--accuraterip` to calculate ARv1 and ARv2 checksums with the ARver Python
+library and compare selected audio tracks with the AccurateRip database:
+
+``` bash
+./riptrack-redump /dev/sg4 --batch --accuraterip
+./riptrack-redump /dev/sg4 2 --accuraterip
+```
+
+AccurateRip verification uses the complete MMC disc layout to identify the
+pressing even when only part of the disc is selected. Track 0 and data tracks
+are not tracked by AccurateRip. A database miss, network failure, or checksum
+mismatch does not delete completed output, and AccurateRip results do not
+replace the separate redumper SCSI/C2 integrity status.
 
 Each run creates a unique temporary workspace for redumper's dump, state,
 BIN, and CUE files. The workspace is removed after success, failure, or

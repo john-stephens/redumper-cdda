@@ -278,6 +278,22 @@ human-readable console parsing if one exists. Before replacing the
 parser, prove the new method correctly reports unresolved errors for
 partial dumps.
 
+## AccurateRip verification
+
+AccurateRip support is opt-in through `--accuraterip` and uses the ARver Python
+library for disc fingerprints, database access/decoding, and ARv1/ARv2 checksum
+calculation. Do not duplicate those algorithms locally.
+
+Build the disc fingerprint from the complete reconciled MMC layout even when
+only a subset is extracted. Verify only selected numbered audio tracks. Track 0
+and data tracks are not represented in AccurateRip. Checksumming a combined
+range may create temporary per-track WAVs at the already established logical
+boundaries, but must never trigger another dump, refine, or split operation.
+
+AccurateRip results are independent of SCSI/C2 integrity. A database miss,
+network failure, or checksum mismatch must not remove completed output or be
+reported as proof that redumper encountered a read error.
+
 ## Refinement
 
 Never refine unconditionally.
@@ -396,6 +412,11 @@ Prefer unit tests for pure parsing/range functions. Cover:
 -   batch ranges produce correctly bounded `trackNN.wav` files;
 -   insufficient split data;
 -   exact PCM payload size.
+-   AccurateRip disc IDs use the complete MMC layout and lead-out;
+-   AccurateRip checksums use the audio-track ordinal and total audio count;
+-   ARv2 matching with ARv1 fallback and confidence reporting;
+-   Track 0 and data-only selections are not AccurateRip-verifiable;
+-   AccurateRip failures retain completed output.
 
 When hardware/media are available, run the validated integration
 comparison against cdparanoia. A production change affecting extraction

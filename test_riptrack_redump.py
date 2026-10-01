@@ -1241,6 +1241,224 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             "Use --include-data",
             rendered,
         )
+        self.assertIn("--accuraterip", rendered)
+
+    def test_accuraterip_disc_id_uses_complete_mmc_layout(self):
+        tracks = [
+            {
+                "number": 1,
+                "kind": "audio",
+                "begin": 0,
+                "end": 100,
+            },
+            {
+                "number": 2,
+                "kind": "data",
+                "begin": 100,
+                "end": 250,
+            },
+        ]
+        calls = {}
+
+        def accuraterip_ids(offsets, lead_out):
+            calls["audio"] = (offsets, lead_out)
+            return "11111111", "22222222"
+
+        def freedb_id(offsets, lead_out):
+            calls["all"] = (offsets, lead_out)
+            return "33333333"
+
+        disc_id = self.module.build_accuraterip_disc_id(
+            tracks,
+            library={
+                "accuraterip_ids": accuraterip_ids,
+                "freedb_id": freedb_id,
+            },
+        )
+
+        self.assertEqual(
+            disc_id,
+            "001-11111111-22222222-33333333",
+        )
+        self.assertEqual(
+            calls["audio"],
+            ([150], 400),
+        )
+        self.assertEqual(
+            calls["all"],
+            ([150, 250], 400),
+        )
+
+    def test_accuraterip_verifies_selected_track_by_audio_index(self):
+        tracks = [
+            {
+                "number": 1,
+                "kind": "audio",
+                "length": 1,
+                "begin": 0,
+                "end": 1,
+            },
+            {
+                "number": 2,
+                "kind": "audio",
+                "length": 1,
+                "begin": 1,
+                "end": 2,
+            },
+        ]
+        checksum_calls = []
+        fetched_ids = []
+
+        class DatabaseDisc:
+            @staticmethod
+            def make_dict():
+                return {
+                    1: {},
+                    2: {
+                        0x22222222: {
+                            "confidence": 9,
+                            "response": 3,
+                        }
+                    },
+                    3: {},
+                }
+
+        class Fetcher:
+            @classmethod
+            def from_id(cls, disc_id):
+                fetched_ids.append(disc_id)
+                return cls()
+
+            @staticmethod
+            def fetch():
+                return DatabaseDisc()
+
+        def get_checksums(path, track_number, total_tracks):
+            checksum_calls.append(
+                (
+                    Path(path).name,
+                    track_number,
+                    total_tracks,
+                )
+            )
+            return Namespace(
+                arv1=0x11111111,
+                arv2=0x22222222,
+            )
+
+        library = {
+            "get_checksums": get_checksums,
+            "fetcher": Fetcher,
+            "accuraterip_ids": (
+                lambda _offsets, _lead_out: (
+                    "aaaaaaaa",
+                    "bbbbbbbb",
+                )
+            ),
+            "freedb_id": (
+                lambda _offsets, _lead_out: "cccccccc"
+            ),
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            workdir = Path(directory)
+            bin_path = workdir / "audio.bin"
+            bin_path.write_bytes(
+                bytes(2 * self.module.SECTOR_SIZE)
+            )
+            report = self.module.verify_with_accuraterip(
+                tracks,
+                [
+                    {
+                        "track": tracks[1],
+                        "segments": [
+                            {
+                                "path": bin_path,
+                                "track": 2,
+                                "start_sector": 1,
+                                "sectors": 1,
+                            }
+                        ],
+                    }
+                ],
+                workdir,
+                library=library,
+            )
+
+        self.assertEqual(
+            fetched_ids,
+            ["002-aaaaaaaa-bbbbbbbb-cccccccc"],
+        )
+        self.assertEqual(
+            checksum_calls,
+            [("accuraterip-track02.wav", 2, 2)],
+        )
+        self.assertEqual(
+            report["results"],
+            [
+                {
+                    "track": 2,
+                    "status": "verified",
+                    "version": "ARv2",
+                    "checksum": 0x22222222,
+                    "confidence": 9,
+                    "response": 3,
+                }
+            ],
+        )
+
+    def test_accuraterip_skips_track_zero(self):
+        tracks = [
+            {
+                "number": 1,
+                "kind": "audio",
+                "length": 1,
+                "begin": 1,
+                "end": 2,
+            }
+        ]
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "Track 0 and data tracks are not tracked",
+        ):
+            self.module.verify_with_accuraterip(
+                tracks,
+                [
+                    {
+                        "track": {
+                            "number": 0,
+                            "kind": "audio",
+                        },
+                        "segments": [],
+                    }
+                ],
+                Path("/tmp"),
+                library={},
+            )
+
+    def test_accuraterip_falls_back_to_arv1(self):
+        result = self.module.match_accuraterip_checksums(
+            0x11111111,
+            0x22222222,
+            {
+                0x11111111: {
+                    "confidence": 7,
+                    "response": 2,
+                }
+            },
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "status": "verified",
+                "version": "ARv1",
+                "checksum": 0x11111111,
+                "confidence": 7,
+                "response": 2,
+            },
+        )
 
     def test_argparse_accepts_include_data_batch_range(self):
         arguments = [
@@ -1598,6 +1816,98 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             self.assertEqual(run_split.call_count, 1)
             self.assertEqual(identify.call_count, 2)
             self.assertEqual(write_wav.call_count, 2)
+
+    def test_accuraterip_failure_retains_completed_output(self):
+        track = self.make_range_tracks()[0]
+        track["kind"] = "audio"
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workdir = root / "work"
+            workdir.mkdir()
+            output_path = root / "track01.wav"
+            output_jobs = [
+                {
+                    "track": track,
+                    "kind": "audio",
+                    "component_tracks": [track],
+                    "expected_sectors": track["length"],
+                    "output_path": output_path,
+                }
+            ]
+            args = Namespace(
+                abort_on_skip=False,
+                accuraterip=True,
+                batch=False,
+                device="/dev/sg-test",
+                include_data=False,
+                output=None,
+                quiet=True,
+                refine_passes=3,
+                retries=100,
+                track=self.module.parse_track_selection("1"),
+                verbose=False,
+            )
+            clean_output = (
+                "media errors:\n"
+                "  SCSI: 0\n"
+                "  C2: 0\n"
+                "  Q: 0\n"
+            )
+
+            with (
+                mock.patch.object(
+                    self.module,
+                    "read_disc_layout",
+                    return_value=[track],
+                ),
+                mock.patch.object(
+                    self.module,
+                    "build_output_jobs",
+                    return_value=output_jobs,
+                ),
+                mock.patch.object(
+                    self.module,
+                    "run_command_capture",
+                    return_value=(0, clean_output),
+                ),
+                mock.patch.object(
+                    self.module,
+                    "run_command",
+                ),
+                mock.patch.object(
+                    self.module,
+                    "identify_generated_audio_segments",
+                    return_value=([], workdir / "disc.cue", 0),
+                ),
+                mock.patch.object(
+                    self.module,
+                    "segments_to_wav",
+                    side_effect=(
+                        lambda _segments, path, _sectors, **_kwargs: (
+                            path.write_bytes(b"wav")
+                        )
+                    ),
+                ),
+                mock.patch.object(
+                    self.module,
+                    "verify_with_accuraterip",
+                    side_effect=RuntimeError("lookup failed"),
+                ),
+                self.assertRaisesRegex(
+                    SystemExit,
+                    "Completed output files were retained",
+                ),
+            ):
+                self.module.extract_track(
+                    args,
+                    workdir,
+                )
+
+            self.assertEqual(
+                output_path.read_bytes(),
+                b"wav",
+            )
 
     def test_mixed_batch_uses_one_dump_and_transactional_outputs(self):
         tracks = self.make_range_tracks()[:2]
