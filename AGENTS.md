@@ -7,9 +7,9 @@ contiguous CD tracks with redumper. It reads the complete track layout
 with MMC `READ TOC` and retains cdparanoia as the validated authority for
 audio-track boundaries during the MMC migration.
 
-Read `README.md` before changing extraction behavior. The rules below
-encode behavior already established through hardware testing and must be
-treated as regression constraints.
+Read `README.md` and `EXTRACTION.md` before changing extraction behavior. The
+rules below encode behavior already established through hardware testing and
+must be treated as regression constraints.
 
 ## Reference documentation
 
