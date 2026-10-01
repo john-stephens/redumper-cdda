@@ -29,6 +29,10 @@ For a range, `logical_start` is the first selected track's start and
 that complete physical range once, with the same one-sector endpoint
 padding used for a single track.
 
+A bare `-` selects Track 1 through the final numbered track, and omitting the
+selection is equivalent to `-`. As with other open ranges, data tracks are
+omitted unless `--include-data` is active. Track 0 is never implicit.
+
 redumper performs the actual read. It must physically read one extra
 sector at the end:
 

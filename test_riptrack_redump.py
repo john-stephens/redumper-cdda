@@ -1064,6 +1064,10 @@ class TemporaryWorkspaceTests(unittest.TestCase):
 
     def test_track_range_forms(self):
         self.assertEqual(
+            self.resolve_numbers("-"),
+            [1, 2, 3, 4],
+        )
+        self.assertEqual(
             self.resolve_numbers("2"),
             [2],
         )
@@ -1123,6 +1127,119 @@ class TemporaryWorkspaceTests(unittest.TestCase):
         self.assertEqual(
             parsed,
             [{"start": None, "end": 3}],
+        )
+
+    def test_argparse_accepts_full_disc_range(self):
+        arguments = [
+            str(SCRIPT_PATH),
+            "/dev/sg-test",
+            "-",
+        ]
+        parsed = []
+
+        def extract_track(args, _workdir):
+            parsed.append(args.track)
+
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                arguments,
+            ),
+            mock.patch.object(
+                self.module.shutil,
+                "which",
+                return_value="/mock/tool",
+            ),
+            mock.patch.object(
+                self.module,
+                "extract_track",
+                side_effect=extract_track,
+            ),
+        ):
+            self.module.main()
+
+        self.assertEqual(
+            parsed,
+            [{"start": None, "end": None}],
+        )
+
+    def test_argparse_defaults_to_full_disc(self):
+        arguments = [
+            str(SCRIPT_PATH),
+            "/dev/sg-test",
+        ]
+        parsed = []
+
+        def extract_track(args, _workdir):
+            parsed.append(args.track)
+
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                arguments,
+            ),
+            mock.patch.object(
+                self.module.shutil,
+                "which",
+                return_value="/mock/tool",
+            ),
+            mock.patch.object(
+                self.module,
+                "extract_track",
+                side_effect=extract_track,
+            ),
+        ):
+            self.module.main()
+
+        self.assertEqual(
+            parsed,
+            [{"start": None, "end": None}],
+        )
+
+    def test_help_explains_track_selection(self):
+        output = io.StringIO()
+        arguments = [
+            str(SCRIPT_PATH),
+            "--help",
+        ]
+
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                arguments,
+            ),
+            redirect_stdout(output),
+            self.assertRaises(SystemExit) as caught,
+        ):
+            self.module.main()
+
+        rendered = output.getvalue()
+
+        self.assertEqual(caught.exception.code, 0)
+        self.assertIn("TRACK SELECTION:", rendered)
+        self.assertIn(
+            "N-M    extract Tracks N through M, inclusive",
+            rendered,
+        )
+        self.assertIn(
+            "-      extract Track 1 through the final numbered track "
+            "(default)",
+            rendered,
+        )
+        self.assertIn(
+            "Omitting TRACK is equivalent to '-'",
+            rendered,
+        )
+        self.assertIn(
+            "Track 0 is never implicit",
+            rendered,
+        )
+        self.assertIn(
+            "Use --include-data",
+            rendered,
         )
 
     def test_argparse_accepts_include_data_batch_range(self):
@@ -1242,7 +1359,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
 
         selected = self.module.resolve_disc_selection(
             tracks,
-            self.module.parse_track_selection("-3"),
+            self.module.parse_track_selection("-"),
             include_data=True,
         )
 

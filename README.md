@@ -36,6 +36,8 @@ mixed audio/data ranges when requested.
 ## Usage
 
 ``` bash
+./riptrack-redump /dev/sg4        # Full disc (all audio tracks)
+./riptrack-redump /dev/sg4 -      # Explicit full-disc selection
 ./riptrack-redump /dev/sg4 2
 ```
 
@@ -48,6 +50,7 @@ Typical optional controls:
 Track selections may be a single track or a contiguous range:
 
 ``` bash
+./riptrack-redump /dev/sg4 -      # Track 1 through the final track
 ./riptrack-redump /dev/sg4 2      # Track 2
 ./riptrack-redump /dev/sg4 1-3    # Tracks 1 through 3
 ./riptrack-redump /dev/sg4 -3     # Tracks 1 through 3
@@ -55,10 +58,11 @@ Track selections may be a single track or a contiguous range:
 ./riptrack-redump /dev/sg4 0-3    # Track 0 through Track 3
 ```
 
-An open-start range such as `-3` begins at Track 1 and does not include
-Track 0. Track 0 must be requested explicitly. A multi-track selection
-is read by one redumper dump covering the full contiguous LBA range; it
-is not implemented as separate per-track dumps.
+Omitting the selection defaults to `-`, which selects the full disc from
+Track 1 through the final numbered track. An open-start range such as `-3`
+also begins at Track 1 and does not include Track 0. Track 0 must be requested
+explicitly. A multi-track selection is read by one redumper dump covering the
+full contiguous LBA range; it is not implemented as separate per-track dumps.
 
 Open-ended ranges automatically omit data tracks. Fully bounded ranges
 are strict: every numbered track in `N-M` must be audio. For example, if
@@ -74,6 +78,7 @@ track may be extracted without batch mode:
 ./riptrack-redump /dev/sg4 1 --include-data
 ./riptrack-redump /dev/sg4 1-3 --include-data --batch
 ./riptrack-redump /dev/sg4 -3 -d -B
+./riptrack-redump /dev/sg4 -d -B  # Full disc, including data tracks
 ```
 
 With `--include-data`, ranges include both audio and data tracks. Audio files

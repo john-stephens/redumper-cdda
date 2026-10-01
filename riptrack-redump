@@ -913,6 +913,12 @@ def find_requested_track(tracks, number):
 
 
 def parse_track_selection(value):
+    if value == "-":
+        return {
+            "start": None,
+            "end": None,
+        }
+
     if re.fullmatch(r"\d+", value):
         number = int(value)
         return {
@@ -925,9 +931,9 @@ def parse_track_selection(value):
         value,
     )
 
-    if not match or not any(match.groups()):
+    if not match:
         raise argparse.ArgumentTypeError(
-            "track must be N, N-M, -M, or N-"
+            "track must be N, N-M, -M, N-, or -"
         )
 
     return {
@@ -991,10 +997,12 @@ def resolve_track_selection(
             if explicit_start is not None
             else explicit_end
         )
-        find_requested_track(
-            tracks,
-            explicit_number,
-        )
+
+        if explicit_number is not None:
+            find_requested_track(
+                tracks,
+                explicit_number,
+            )
 
         selected = [
             track
@@ -2302,10 +2310,26 @@ def create_output_files(output_jobs, verbose=False):
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Extract one or more CD tracks using MMC and "
-            "cdparanoia for validated track boundaries and redumper for the "
-            "actual offset-corrected extraction."
-        )
+            "Extract one or more CD tracks using MMC and cdparanoia for\n"
+            "validated track boundaries and redumper for the actual\n"
+            "offset-corrected extraction."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+TRACK SELECTION:
+  N      extract Track N
+  N-M    extract Tracks N through M, inclusive
+  -M     extract Track 1 through M, inclusive
+  N-     extract Track N through the final numbered track
+  -      extract Track 1 through the final numbered track (default)
+
+Omitting TRACK is equivalent to '-'. Track 0 is never implicit; request it
+explicitly with 0 or a range such as 0-3.
+
+By default, open ranges omit data tracks. A single N or fully bounded N-M
+selection fails if it explicitly names a data track. Use --include-data to
+include data tracks. Mixed or multi-track data selections require --batch.
+""",
     )
 
     parser.add_argument(
@@ -2316,8 +2340,12 @@ def main():
         "track",
         type=parse_track_selection,
         nargs="?",
+        default=parse_track_selection("-"),
         metavar="TRACK",
-        help="Track number or range: N, N-M, -M, or N-",
+        help=(
+            "Track number or range: N, N-M, -M, N-, or - "
+            "(default: -, the full disc)"
+        ),
     )
 
     parser.add_argument(
@@ -2415,14 +2443,6 @@ def main():
     )
 
     args = parser.parse_args()
-
-    if (
-        args.track is None
-        and not args.show_layout
-    ):
-        parser.error(
-            "track is required unless --show-layout is used"
-        )
 
     if args.retries < 0:
         sys.exit(

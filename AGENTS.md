@@ -70,8 +70,10 @@ zero of Track 1's AUDIO BIN and stops immediately before INDEX 01.
 
 ### Track ranges
 
-Accepted selections are `N`, `N-M`, `-M`, and `N-`. An omitted start
-means Track 1, never Track 0. Track 0 must be explicit, such as `0-3`.
+Accepted selections are `N`, `N-M`, `-M`, `N-`, and `-`. A bare `-` selects
+the full disc from Track 1 through the final numbered track, and omitting the
+selection is equivalent to `-`. An omitted start means Track 1, never Track 0.
+Track 0 must be explicit, such as `0-3`.
 
 Treat cdparanoia's parsed track list as the audio-track set. Fully
 bounded `N-M` selections are strict and must fail if any number in the
@@ -377,7 +379,7 @@ Prefer unit tests for pure parsing/range functions. Cover:
 -   Track 0 CUE INDEX 01 agreement with cdparanoia length;
 -   following track pregap inclusion;
 -   exact range assembly across two or more BINs;
--   all four track selection forms;
+-   all five track selection forms and the omitted-selection default;
 -   open-start ranges exclude Track 0;
 -   open ranges omit data tracks;
 -   bounded ranges reject explicitly selected data tracks;
