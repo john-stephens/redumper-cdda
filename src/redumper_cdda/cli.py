@@ -2739,7 +2739,7 @@ include data tracks. --single-file cannot combine audio and data tracks.
         default=True,
         help=(
             "Disable AccurateRip verification "
-            "(default: enabled when ARver is installed)"
+            "(default: enabled)"
         ),
     )
 
@@ -3397,7 +3397,7 @@ def extract_track(args, workdir):
         )
 
     # --------------------------------------------------------------
-    # Optional AccurateRip verification. Output creation is already
+    # AccurateRip verification. Output creation is already
     # complete, so lookup failures or checksum mismatches never remove
     # successfully written WAV/ISO files.
     # --------------------------------------------------------------

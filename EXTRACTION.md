@@ -170,8 +170,8 @@ console parsing if one can be validated.
 ## AccurateRip verification
 
 AccurateRip is a post-extraction check implemented with the
-[ARver](https://pypi.org/project/ARver/) Python library. It runs by default when
-ARver and its runtime dependencies are installed, and can be disabled with
+[ARver](https://pypi.org/project/ARver/) Python library, which is a required
+package dependency. Verification runs by default and can be disabled with
 `--no-accuraterip`. The complete reconciled MMC layout supplies all track
 offsets and lead-out for the AccurateRip disc ID, while checksums are calculated
 only for selected audio tracks. Combined output is temporarily separated at the

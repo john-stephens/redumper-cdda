@@ -280,11 +280,12 @@ partial dumps.
 
 ## AccurateRip verification
 
-AccurateRip support is enabled by default when the ARver Python library and its
-runtime dependencies are installed. `--no-accuraterip` disables it. Use ARver
-for disc fingerprints, database access/decoding, and ARv1/ARv2 checksum
-calculation. Do not duplicate those algorithms locally. A missing or unloadable
-ARver installation disables verification rather than failing extraction.
+ARver is a required package dependency and AccurateRip support is enabled by
+default. `--no-accuraterip` disables it. Use ARver for disc fingerprints,
+database access/decoding, and ARv1/ARv2 checksum calculation. Do not duplicate
+those algorithms locally. A missing or unloadable ARver installation still
+disables verification rather than failing extraction when running directly
+from a source checkout.
 
 Build the disc fingerprint from the complete reconciled MMC layout even when
 only a subset is extracted. Verify only selected numbered audio tracks. Track 0

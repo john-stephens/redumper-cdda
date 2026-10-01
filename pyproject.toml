@@ -13,7 +13,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
 license-files = ["LICENSE"]
-dependencies = []
+dependencies = ["ARver>=1.5,<2"]
 keywords = ["accuraterip", "cdda", "cd-ripping", "redumper"]
 classifiers = [
     "Environment :: Console",
@@ -26,9 +26,6 @@ classifiers = [
 Homepage = "https://github.com/john-stephens/redumper-cdda"
 Repository = "https://github.com/john-stephens/redumper-cdda"
 Issues = "https://github.com/john-stephens/redumper-cdda/issues"
-
-[project.optional-dependencies]
-accuraterip = ["ARver>=1.5,<2"]
 
 [project.scripts]
 redumper-cdda = "redumper_cdda.cli:run"

@@ -20,8 +20,7 @@ mixed audio/data ranges when requested.
 -   Produces one numbered WAV or ISO per track by default, with optional
     combined WAV output and customizable filenames.
 -   Optionally extracts data tracks as validated, mountable `trackNN.iso` files.
--   Automatically verifies selected audio tracks against the AccurateRip
-    database when ARver is installed.
+-   Verifies selected audio tracks against the AccurateRip database by default.
 -   Refines errors and supports strict abort-on-error behavior.
 
 ## Requirements
@@ -35,9 +34,9 @@ mixed audio/data ranges when requested.
     [drive-support documentation](https://github.com/superg/redumper#drive-support)
     is recommended for accurate CD dumping. The installed redumper executable
     can also list recommended models with `redumper --list-recommended-drives`.
--   Optional: [ARver](https://pypi.org/project/ARver/) 1.5 or newer and an
-    internet connection for automatic AccurateRip verification. Install the
-    `accuraterip` package extra described below.
+-   [ARver](https://pypi.org/project/ARver/) 1.5 or newer. It is installed as
+    a required Python dependency. AccurateRip verification also requires an
+    internet connection.
 
 ## Installation
 
@@ -48,21 +47,13 @@ Install the command in an isolated environment with
 pipx install redumper-cdda
 ```
 
-To include automatic AccurateRip verification, install the `accuraterip`
-extra:
-
-``` bash
-pipx install 'redumper-cdda[accuraterip]'
-```
-
 Until the first PyPI release, install directly from GitHub instead:
 
 ``` bash
-pipx install 'redumper-cdda[accuraterip] @ git+https://github.com/john-stephens/redumper-cdda.git'
+pipx install 'redumper-cdda @ git+https://github.com/john-stephens/redumper-cdda.git'
 ```
 
-From an existing checkout, use `pipx install .` or install the AccurateRip
-extra with `pipx install '.[accuraterip]'`. The installation creates the
+From an existing checkout, use `pipx install .`. The installation creates the
 `redumper-cdda` command on the user path. System tools such as redumper,
 cdparanoia, and `sg_raw` remain external requirements.
 
@@ -157,7 +148,7 @@ or failure:
 redumper-cdda /dev/sg4 2 --quiet
 ```
 
-When ARver is installed, the script calculates ARv1 and ARv2 checksums and
+By default, the script calculates ARv1 and ARv2 checksums with ARver and
 compares selected audio tracks with the AccurateRip database automatically:
 
 ``` bash
