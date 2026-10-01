@@ -5,6 +5,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "redumper-cdda"
 version = "0.1.0"
+authors = [
+    { name = "John Stephens" },
+]
 description = "Accurately extract CD audio track ranges with redumper"
 readme = "README.md"
 requires-python = ">=3.9"
