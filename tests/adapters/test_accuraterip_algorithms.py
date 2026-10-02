@@ -1,4 +1,4 @@
-"""Tests for AccurateRip identification and verification."""
+"""Adapter tests for AccurateRip identification and verification."""
 
 import builtins
 import warnings
@@ -21,6 +21,45 @@ from redumper_cdda import accuraterip
 
 
 class AccurateRipCoverageTests(unittest.TestCase):
+    def test_checksum_match_prefers_v2_then_v1(self):
+        candidates = {
+            1: {"confidence": 2, "response": "v1"},
+            2: {"confidence": 3, "response": "v2"},
+        }
+        self.assertEqual(
+            self.module.match_accuraterip_checksums(1, 2, candidates)["version"],
+            "ARv2",
+        )
+        self.assertEqual(
+            self.module.match_accuraterip_checksums(1, 9, candidates)["version"],
+            "ARv1",
+        )
+
+    def test_successful_mixed_mode_verification_and_empty_selection(self):
+        data = {"number": 1, "kind": "data", "begin": 0, "end": 10, "length": 10}
+        audio = {"number": 2, "kind": "audio", "begin": 10, "end": 20, "length": 10}
+        library = {
+            "accuraterip_ids": lambda offsets, leadout: (1, 2),
+            "freedb_id": lambda offsets, leadout: 3,
+            "fetcher": mock.Mock(),
+            "get_checksums": mock.Mock(return_value=mock.Mock(arv1=4, arv2=5)),
+        }
+        database = mock.Mock()
+        database.make_dict.return_value = {2: {5: {"confidence": 7, "response": "ok"}}}
+        library["fetcher"].from_id.return_value.fetch.return_value = database
+        verification = [{"track": audio, "segments": []}]
+        with mock.patch.object(self.module, "segments_to_wav") as write:
+            report = self.module.verify_with_accuraterip(
+                [data, audio], verification, Path("."), library=library
+            )
+        self.assertEqual(report["results"][0]["status"], "verified")
+        write.assert_called_once()
+
+        with self.assertRaisesRegex(RuntimeError, "no AccurateRip-verifiable"):
+            self.module.verify_with_accuraterip(
+                [data, audio], [{"track": {**audio, "number": 0}, "segments": []}],
+                Path("."), library=library,
+            )
     def setUp(self):
         self.module = importlib.reload(accuraterip)
 
@@ -149,27 +188,3 @@ class AccurateRipCoverageTests(unittest.TestCase):
             self.module.verify_with_accuraterip(
                 [track], verification, Path("."), library=missing
             )
-
-    def test_accuraterip_report_all_statuses(self):
-        report = {
-            "disc_id": "disc",
-            "results": [
-                {
-                    "track": 1, "status": "verified", "version": "ARv2",
-                    "checksum": 2, "confidence": 4, "response": "ok",
-                },
-                {"track": 2, "status": "not-present", "arv1": 1, "arv2": 2},
-                {"track": 3, "status": "no-match", "arv1": 3, "arv2": 4},
-            ],
-        }
-        with redirect_stdout(io.StringIO()) as output:
-            self.module.print_accuraterip_report(report, verbose=True)
-        rendered = output.getvalue()
-        self.assertIn("response ok", rendered)
-        self.assertIn("not present", rendered)
-        self.assertIn("no match", rendered)
-
-        report["results"] = report["results"][:1]
-        with redirect_stdout(io.StringIO()) as output:
-            self.module.print_accuraterip_report(report, verbose=False)
-        self.assertNotIn("response ok", output.getvalue())

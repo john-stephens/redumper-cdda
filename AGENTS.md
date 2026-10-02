@@ -7,9 +7,10 @@ contiguous CD tracks with redumper. It reads the complete track layout
 with MMC `READ TOC` and retains cdparanoia as the validated authority for
 audio-track boundaries during the MMC migration.
 
-Read `README.md` and `EXTRACTION.md` before changing extraction behavior. The
-rules below encode behavior already established through hardware testing and
-must be treated as regression constraints.
+Read `README.md`, `EXTRACTION.md`, and `ARCHITECTURE.md` before changing
+extraction behavior or application structure. The rules below encode behavior
+already established through hardware testing and must be treated as regression
+constraints.
 
 ## Reference documentation
 
@@ -22,6 +23,48 @@ tools used by this project:
 Consult these files when changing command construction, option handling,
 or output parsing. Treat them as local reference snapshots; they provide
 context but do not override the extraction invariants in this file.
+
+## Architecture constraints
+
+The implemented architecture is documented in `ARCHITECTURE.md`. Preserve its
+dependency direction:
+
+``` text
+CLI/bootstrap -> adapters and application -> ports/domain
+adapters -> ports/domain
+application -> ports/domain
+domain -> no outer layer
+```
+
+Use the existing ownership boundaries:
+
+-   immutable values, phase results, events, and typed errors belong in
+    `src/redumper_cdda/domain/`;
+-   extraction policy and phase sequencing belong in
+    `src/redumper_cdda/application/`;
+-   replaceable dependencies use focused protocols in
+    `src/redumper_cdda/ports/`;
+-   subprocess, filesystem, CUE, console, and external-tool behavior belongs
+    in `src/redumper_cdda/adapters/`;
+-   concrete production dependencies are assembled only in
+    `src/redumper_cdda/bootstrap.py`;
+-   argument parsing, CLI-only validation, and translation to process exits
+    belong in `src/redumper_cdda/cli.py`.
+
+`ExtractionApplication` is the one extraction coordinator. It sequences
+layout, planning, verifier preflight, acquisition, splitting, transactional
+output, and optional verification. It must not parse tool output, discover
+files, copy sectors, format reports, or call `sys.exit`.
+
+Application services publish structured `LifecycleEvent` values. Only console
+reporters format routine output. Reporting must remain observational and must
+never affect extraction policy. Do not add `verbose` or `quiet` branches to
+application services.
+
+Do not reintroduce the deleted top-level workflow, mutable output-job
+dictionaries, dictionary compatibility adapters, a service locator, or a
+second composition root. External dictionary-shaped data must be translated at
+the adapter boundary and must not enter plans or application services.
 
 ## Non-negotiable extraction invariants
 
@@ -390,11 +433,23 @@ python -m coverage run -m unittest discover -s tests -v
 python -m coverage report
 ```
 
-Keep unit tests in the top-level `tests/` directory. Test filenames must mirror
-their owning source modules under `src/redumper_cdda`; for example,
-`src/redumper_cdda/layout.py` is tested by `tests/test_layout.py`, and
-`src/redumper_cdda/cli.py` is tested by `tests/test_cli.py`. When moving code
-between source modules, move the corresponding unit tests at the same time.
+Organize tests by architectural ownership:
+
+``` text
+tests/
+|-- domain/
+|-- application/
+|-- adapters/
+|-- contracts/
+`-- test_cli.py
+```
+
+Test filenames should mirror their owning source module within the appropriate
+directory. Domain tests cover immutable values and calculations, application
+tests use fake ports, adapter tests cover exact external syntax and filesystem
+behavior, contract tests cover shared port expectations and composition, and
+`tests/test_cli.py` covers the CLI/error boundary. When moving code between
+layers, move the corresponding tests at the same time.
 
 Prefer unit tests for pure parsing/range functions. Cover:
 
@@ -473,6 +528,12 @@ must not introduce any sample differences in the established comparison.
 The installable package lives under `src/redumper_cdda`. Keep the repository
 `redumper-cdda` launcher thin; the pipx console script and repository launcher
 must both call `redumper_cdda.cli.run` so behavior cannot diverge.
+
+Preserve the ports-and-adapters boundaries in `ARCHITECTURE.md`. Prefer
+constructor injection through narrow protocols. Add concrete dependencies only
+in `bootstrap.py`. Application services must return typed immutable results and
+must not print, inspect CLI namespaces, or depend on concrete adapters. Only
+the CLI boundary may call `sys.exit`.
 
 Keep sector arithmetic explicit and auditable. Prefer names such as:
 

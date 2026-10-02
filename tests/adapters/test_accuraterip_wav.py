@@ -1,4 +1,4 @@
-"""Tests for output planning and transactional WAV/ISO creation."""
+"""Adapter tests for AccurateRip temporary WAV assembly."""
 
 import importlib
 import io
@@ -57,12 +57,3 @@ class OutputCoverageTests(unittest.TestCase):
             source.write_bytes(b"short")
             with self.assertRaisesRegex(RuntimeError, "Unexpected end"):
                 self.module.segments_to_wav([segment], root / "bad.wav", 1)
-
-    def test_remove_output_files_ignores_unlink_error(self):
-        path = mock.Mock()
-        path.exists.return_value = True
-        path.unlink.side_effect = OSError
-        self.module.remove_output_job_files(
-            [{"temporary_path": path, "output_path": path}]
-        )
-        self.assertEqual(path.unlink.call_count, 2)

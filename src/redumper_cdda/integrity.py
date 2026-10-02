@@ -48,16 +48,6 @@ def print_media_errors(errors):
     print(f"Q:    {errors['Q']}")
 
 
-def data_errors_present(errors):
-    """Return whether SCSI or C2 errors affect extracted data."""
-
-    return errors["SCSI"] != 0 or errors["C2"] != 0
-
-
-def should_abort_on_errors(errors, abort_on_skip):
-    return abort_on_skip and data_errors_present(errors)
-
-
 def parse_split_write_offsets(output):
     """Return redumper's logical-LBA-to-state sample offsets."""
 

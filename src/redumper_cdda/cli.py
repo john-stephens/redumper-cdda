@@ -1,350 +1,174 @@
 #!/usr/bin/env python3
+"""Command-line composition and error boundary."""
 
 import argparse
-import signal
+import re
 import shutil
+import signal
 import sys
-import tempfile
 from pathlib import Path
 
-from .accuraterip import load_accuraterip_library
-from .layout import parse_track_selection
-from .workflow import (
-    TerminationRequested,
-    extract_track,
-    read_disc_layout,
-)
+from .adapters.console import reporter_for
+from .bootstrap import create_application
+from .domain.errors import DependencyError, RedumperCddaError, TerminationRequested
+from .domain.events import LifecycleEvent
+from .domain.extraction import ExtractionRequest, TrackSelection
 
 
 DEFAULT_REFINE_PASSES = 3
 
 
-def print_disc_layout(tracks):
-    print()
-    print("Disc track layout")
-    print("-----------------")
+class ArgumentParserFactory:
+    def create(self):
+        parser = argparse.ArgumentParser(
+            description=(
+                "Extract one or more CD tracks using MMC and cdparanoia for "
+                "validated boundaries and redumper for extraction."
+            )
+        )
+        parser.add_argument("device")
+        parser.add_argument(
+            "track", type=self.track_selection, nargs="?",
+            default=TrackSelection(), metavar="TRACK",
+        )
+        parser.add_argument("--output", type=Path)
+        parser.add_argument("--retries", type=int, default=100)
+        parser.add_argument("--refine-passes", type=int, default=DEFAULT_REFINE_PASSES)
+        parser.add_argument("-X", "--abort-on-skip", action="store_true")
+        parser.add_argument("-s", "--single-file", action="store_true")
+        parser.add_argument("-p", "--prefix", default="track", metavar="PREFIX")
+        parser.add_argument("-d", "--include-data", action="store_true")
+        parser.add_argument("--show-layout", action="store_true")
+        parser.add_argument(
+            "--no-accuraterip", dest="accuraterip", action="store_false", default=True
+        )
+        mode = parser.add_mutually_exclusive_group()
+        mode.add_argument("-v", "--verbose", action="store_true")
+        mode.add_argument("-q", "--quiet", action="store_true")
+        return parser
 
-    print(
-        f"{'Track':>5}  "
-        f"{'Type':<5}  "
-        f"{'Length':>10}  "
-        f"{'Begin':>10}  "
-        f"{'End':>10}"
-    )
-
-    for track in tracks:
-        print(
-            f"{track['number']:>5}  "
-            f"{track.get('kind', 'audio'):<5}  "
-            f"{track['length']:>10}  "
-            f"{track['begin']:>10}  "
-            f"{track['end']:>10}"
+    @staticmethod
+    def track_selection(value):
+        if value == "-":
+            return TrackSelection()
+        if re.fullmatch(r"\d+", value):
+            number = int(value)
+            return TrackSelection(number, number)
+        match = re.fullmatch(r"(\d*)-(\d*)", value)
+        if not match:
+            raise argparse.ArgumentTypeError("track must be N, N-M, -M, N-, or -")
+        return TrackSelection(
+            int(match.group(1)) if match.group(1) else None,
+            int(match.group(2)) if match.group(2) else None,
         )
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description=(
-            "Extract one or more CD tracks using MMC and cdparanoia for\n"
-            "validated track boundaries and redumper for the actual\n"
-            "offset-corrected extraction."
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""\
-TRACK SELECTION:
-  N      extract Track N
-  N-M    extract Tracks N through M, inclusive
-  -M     extract Track 1 through M, inclusive
-  N-     extract Track N through the final numbered track
-  -      extract Track 1 through the final numbered track (default)
+class SystemDependencyChecker:
+    def __init__(self, which=shutil.which):
+        self._which = which
 
-Omitting TRACK is equivalent to '-'. Track 0 is never implicit; request it
-explicitly with 0 or a range such as 0-3.
+    def check(self, show_layout=False):
+        required = ["cdparanoia", "sg_raw"]
+        if not show_layout:
+            required.append("redumper")
+        for executable in required:
+            if self._which(executable) is None:
+                raise DependencyError(f"{executable} not found")
 
-By default, open ranges omit data tracks. A single N or fully bounded N-M
-selection fails if it explicitly names a data track. Use --include-data to
-include data tracks. --single-file cannot combine audio and data tracks.
-""",
-    )
 
-    parser.add_argument(
-        "device",
-    )
-
-    parser.add_argument(
-        "track",
-        type=parse_track_selection,
-        nargs="?",
-        default=parse_track_selection("-"),
-        metavar="TRACK",
-        help=(
-            "Track number or range: N, N-M, -M, N-, or - "
-            "(default: -, the full disc)"
-        ),
-    )
-
-    parser.add_argument(
-        "--output",
-        type=Path,
-        help=(
-            "Output path for --single-file "
-            "(default: ./PREFIX.wav or ./PREFIXNN.ext)"
-        ),
-    )
-
-    parser.add_argument(
-        "--retries",
-        type=int,
-        default=100,
-        help=(
-            "Sector retries per redumper pass "
-            "(default: 100)"
-        ),
-    )
-
-    parser.add_argument(
-        "--refine-passes",
-        type=int,
-        default=DEFAULT_REFINE_PASSES,
-        help=(
-            "Maximum refine passes when SCSI/C2 "
-            f"errors remain (default: "
-            f"{DEFAULT_REFINE_PASSES})"
-        ),
-    )
-
-    parser.add_argument(
-        "-X",
-        "--abort-on-skip",
-        action="store_true",
-        help=(
-            "Skip separate track files with unresolved SCSI/C2 "
-            "errors; --single-file remains all-or-nothing "
-            "(default: write affected output with a warning)"
-        ),
-    )
-
-    parser.add_argument(
-        "-s",
-        "--single-file",
-        action="store_true",
-        help=(
-            "Combine selected audio tracks into one PREFIX.wav "
-            "(default: one PREFIXNN.wav or PREFIXNN.iso per track)"
-        ),
-    )
-
-    parser.add_argument(
-        "-p",
-        "--prefix",
-        default="track",
-        metavar="PREFIX",
-        help=(
-            "Prefix for automatically named output files "
-            "(default: track)"
-        ),
-    )
-
-    parser.add_argument(
-        "-d",
-        "--include-data",
-        action="store_true",
-        help=(
-            "Include data tracks as PREFIXNN.iso; incompatible with "
-            "--single-file unless TRACK is one explicit data track "
-            "(default: omit data tracks)"
-        ),
-    )
-
-    parser.add_argument(
-        "--show-layout",
-        action="store_true",
-        help=(
-            "Print the complete audio/data track layout and exit "
-            "without dumping"
-        ),
-    )
-
-    parser.add_argument(
-        "--no-accuraterip",
-        dest="accuraterip",
-        action="store_false",
-        default=True,
-        help=(
-            "Disable AccurateRip verification "
-            "(default: enabled)"
-        ),
-    )
-
-    output_mode = parser.add_mutually_exclusive_group()
-
-    output_mode.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        help=(
-            "Show commands, full tool output, ranges, "
-            "and conversion details "
-            "(default output mode: concise)"
-        ),
-    )
-
-    output_mode.add_argument(
-        "-q",
-        "--quiet",
-        action="store_true",
-        help=(
-            "Suppress routine output "
-            "(default output mode: concise)"
-        ),
-    )
-
-    args = parser.parse_args()
-
-    if args.retries < 0:
-        sys.exit(
-            "ERROR: invalid retry count"
-        )
-
-    if args.refine_passes < 0:
-        sys.exit(
-            "ERROR: invalid refine-pass count"
-        )
-
-    if (
-        not args.prefix
-        or args.prefix in (".", "..")
-        or Path(args.prefix).name != args.prefix
+class CliApplication:
+    def __init__(
+        self,
+        parser_factory=ArgumentParserFactory,
+        dependency_checker=None,
+        application_factory=create_application,
+        reporter_factory=reporter_for,
     ):
-        parser.error(
-            "--prefix must be a non-empty filename prefix "
-            "without directory components"
-        )
+        self._parser_factory = parser_factory
+        self._dependency_checker = dependency_checker or SystemDependencyChecker()
+        self._application_factory = application_factory
+        self._reporter_factory = reporter_factory
 
-    if args.accuraterip and not args.show_layout:
-        try:
-            load_accuraterip_library()
-        except RuntimeError:
-            args.accuraterip = False
-
-    if (
-        args.include_data
-        and not args.show_layout
-        and args.single_file
-        and (
-            args.track["start"] is None
-            or args.track["end"] is None
-            or args.track["start"]
-            != args.track["end"]
-        )
-    ):
-        parser.error(
-            "--include-data cannot use --single-file for a track range"
-        )
-
-    if shutil.which(
-        "cdparanoia"
-    ) is None:
-        sys.exit(
-            "ERROR: cdparanoia not found"
-        )
-
-    if shutil.which(
-        "sg_raw"
-    ) is None:
-        sys.exit(
-            "ERROR: sg_raw not found"
-        )
-
-    if args.show_layout:
-        try:
-            tracks = read_disc_layout(
-                args.device,
-                verbose=args.verbose,
+    def execute(self, argv=None):
+        parser = self._parser_factory().create()
+        args = parser.parse_args(argv)
+        self._validate(parser, args)
+        self._dependency_checker.check(args.show_layout)
+        reporter = self._reporter_factory(args.verbose, args.quiet)
+        application = self._application_factory(reporter)
+        if args.show_layout:
+            reporter.publish(
+                LifecycleEvent("disc_layout", application.read_layout(args.device))
             )
-        except RuntimeError as exc:
-            sys.exit(
-                f"ERROR: {exc}"
+            return 0
+        request = ExtractionRequest(
+            device=args.device,
+            selection=args.track,
+            include_data=args.include_data,
+            single_file=args.single_file,
+            output=args.output,
+            prefix=args.prefix,
+            retries=args.retries,
+            refine_passes=args.refine_passes,
+            abort_on_skip=args.abort_on_skip,
+            accuraterip=args.accuraterip,
+        )
+        application.run(request)
+        return 0
+
+    @staticmethod
+    def _validate(parser, args):
+        if args.retries < 0:
+            parser.error("invalid retry count")
+        if args.refine_passes < 0:
+            parser.error("invalid refine-pass count")
+        if (
+            not args.prefix
+            or args.prefix in (".", "..")
+            or Path(args.prefix).name != args.prefix
+        ):
+            parser.error(
+                "--prefix must be a non-empty filename prefix without directory components"
             )
-
-        if not args.quiet:
-            print_disc_layout(
-                tracks
-            )
-        return
-
-    if not args.single_file and args.output:
-        parser.error(
-            "--output requires --single-file; separate files use "
-            "PREFIXNN.wav or PREFIXNN.iso in the current directory"
-        )
-
-    if shutil.which(
-        "redumper"
-    ) is None:
-        sys.exit(
-            "ERROR: redumper not found"
-        )
-
-    prefix = "redumper-cdda-"
-
-    with tempfile.TemporaryDirectory(
-        prefix=prefix,
-    ) as temporary_path:
-        workdir = Path(temporary_path)
-
-        if args.verbose:
-            print(
-                f"Temporary workspace: {workdir}"
-            )
-
-        extract_track(
-            args,
-            workdir,
-        )
-
-    if args.verbose:
-        print(
-            f"Temporary workspace removed: {workdir}"
-        )
+        if not args.show_layout and not args.single_file and args.output:
+            parser.error("--output requires --single-file")
+        if not args.show_layout and args.include_data and args.single_file and (
+            args.track.start is None
+            or args.track.end is None
+            or args.track.start != args.track.end
+        ):
+            parser.error("--include-data cannot use --single-file for a track range")
 
 
 def handle_termination_signal(signum, _frame):
-    raise TerminationRequested(signum)
+    raise TerminationRequested(signum, signal.Signals(signum).name)
 
 
 def install_signal_handlers():
-    for signal_name in (
-        "SIGHUP",
-        "SIGTERM",
-    ):
-        signum = getattr(
-            signal,
-            signal_name,
-            None,
-        )
-
+    for name in ("SIGHUP", "SIGTERM"):
+        signum = getattr(signal, name, None)
         if signum is not None:
-            signal.signal(
-                signum,
-                handle_termination_signal,
-            )
+            signal.signal(signum, handle_termination_signal)
+
+
+def main(argv=None):
+    return CliApplication().execute(argv)
 
 
 def run():
     install_signal_handlers()
-
     try:
-        main()
+        code = main()
     except KeyboardInterrupt:
-        sys.exit(
-            "\nInterrupted. Temporary files were cleaned up."
-        )
+        sys.exit("\nInterrupted. Temporary files were cleaned up.")
     except TerminationRequested as exc:
         sys.exit(
-            f"\nReceived {exc.signal_name}. "
-            "Temporary files were cleaned up."
+            f"\nReceived {exc.signal_name}. Temporary files were cleaned up."
         )
+    except RedumperCddaError as exc:
+        sys.exit(f"ERROR: {exc}")
+    if code:
+        sys.exit(code)
 
 
 if __name__ == "__main__":

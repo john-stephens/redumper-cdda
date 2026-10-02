@@ -1,4 +1,4 @@
-"""AccurateRip identification, checksum matching, and reporting."""
+"""ARver integration algorithms used by the AccurateRip adapter."""
 
 import io
 from contextlib import redirect_stdout
@@ -254,50 +254,3 @@ def verify_with_accuraterip(
         "disc_id": disc_id,
         "results": results,
     }
-
-
-def print_accuraterip_report(report, verbose=False):
-    print()
-    print("AccurateRip verification")
-    print("========================")
-    print(f"Disc ID: {report['disc_id']}")
-    print()
-
-    verified = 0
-
-    for result in report["results"]:
-        track_label = f"Track {result['track']:02d}"
-
-        if result["status"] == "verified":
-            verified += 1
-            response = (
-                f", response {result['response']}"
-                if verbose
-                else ""
-            )
-            print(
-                f"{track_label}: verified "
-                f"({result['version']} "
-                f"{result['checksum']:08x}, "
-                f"confidence {result['confidence']}"
-                f"{response})"
-            )
-        elif result["status"] == "not-present":
-            print(
-                f"{track_label}: not present in the database "
-                f"(ARv1 {result['arv1']:08x}, "
-                f"ARv2 {result['arv2']:08x})"
-            )
-        else:
-            print(
-                f"{track_label}: no match "
-                f"(ARv1 {result['arv1']:08x}, "
-                f"ARv2 {result['arv2']:08x})"
-            )
-
-    total = len(report["results"])
-    print()
-    print(
-        f"Verified: {verified}/{total} selected audio "
-        f"track{'' if total == 1 else 's'}"
-    )

@@ -1,4 +1,4 @@
-"""Tests for raw data-sector conversion and ISO9660 validation."""
+"""Adapter tests for raw-sector conversion and ISO9660 validation."""
 
 import io
 from contextlib import redirect_stdout
@@ -17,6 +17,22 @@ from redumper_cdda import iso9660
 
 
 class Iso9660CoverageTests(unittest.TestCase):
+    def test_mode2_form2_is_rejected_and_form1_payload_is_returned(self):
+        sector = bytearray(self.module.SECTOR_SIZE)
+        sector[:12] = b"\0" + b"\xff" * 10 + b"\0"
+        sector[15] = 2
+        sector[16:20] = b"\0\0\0\0"
+        sector[20:24] = b"\0\0\0\0"
+        sector[18] |= 0x20
+        sector[22] = sector[18]
+        with self.assertRaisesRegex(RuntimeError, "Form 2"):
+            self.module.extract_iso_payload(bytes(sector), "MODE2/2352")
+        sector[18] &= ~0x20
+        sector[22] = sector[18]
+        self.assertEqual(
+            len(self.module.extract_iso_payload(bytes(sector), "MODE2/2352")),
+            2048,
+        )
     def setUp(self):
         self.module = importlib.reload(iso9660)
 
@@ -146,3 +162,7 @@ class Iso9660CoverageTests(unittest.TestCase):
             ):
                 self.module.data_track_to_iso(data_track, root / "ok.iso", verbose=True)
             self.assertIn("ISO conversion", output.getvalue())
+            with mock.patch.object(
+                self.module, "read_iso9660_volume_size", return_value=1
+            ):
+                self.module.data_track_to_iso(data_track, root / "quiet.iso")

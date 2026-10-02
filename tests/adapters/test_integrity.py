@@ -1,4 +1,4 @@
-"""Tests for redumper media-error and state-file integrity handling."""
+"""Adapter tests for redumper media-error and state-file handling."""
 
 import io
 from contextlib import redirect_stdout
@@ -17,6 +17,33 @@ from redumper_cdda import integrity
 
 
 class IntegrityCoverageTests(unittest.TestCase):
+    def test_media_error_last_block_and_default_offset(self):
+        text = (
+            "media errors: SCSI: 1 C2: 2 Q: 3\n"
+            "media errors: SCSI: 4 C2: 5 Q: 6\n"
+        )
+        self.assertEqual(
+            self.module.parse_media_errors(text), {"SCSI": 4, "C2": 5, "Q": 6}
+        )
+        self.assertEqual(
+            self.module.parse_split_write_offsets("disc write offset: 48"),
+            [(0, 48)],
+        )
+
+    def test_state_file_success_counts_samples_and_sectors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "disc.state"
+            first = bytes([0]) + bytes([2]) * 587
+            second = bytes([1]) + bytes([2]) * 587
+            path.write_bytes(first + second)
+            tracks = [{"number": 1, "begin": -45150, "end": -45148}]
+            result = self.module.inspect_track_media_errors(
+                path, tracks, [(-45150, 0), (-45149, 0)]
+            )
+            self.assertEqual(result[1]["SCSI"], 1)
+            self.assertEqual(result[1]["C2"], 1)
+            self.assertEqual(result[1]["SCSI sectors"], 1)
+            self.assertEqual(result[1]["C2 sectors"], 1)
     def setUp(self):
         self.module = importlib.reload(integrity)
 

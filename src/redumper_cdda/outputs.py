@@ -1,113 +1,12 @@
-"""Output planning and transactional WAV/ISO creation."""
+"""Temporary WAV assembly used by the ARver integration."""
 
 import wave
-from pathlib import Path
-
-from .iso9660 import data_track_to_iso
-from .layout import sectors_to_msf
 
 
 SECTOR_SIZE = 2352
 SAMPLE_RATE = 44100
 CHANNELS = 2
 SAMPLE_WIDTH = 2
-
-
-def build_output_jobs(
-    selected_tracks,
-    single_file,
-    output=None,
-    output_directory=None,
-    prefix="track",
-):
-    directory = (
-        Path.cwd()
-        if output_directory is None
-        else Path(output_directory)
-    )
-
-    if not single_file:
-        return [
-            {
-                "track": track,
-                "kind": track.get("kind", "audio"),
-                "component_tracks": (
-                    [track]
-                    if track.get("kind", "audio") == "audio"
-                    else []
-                ),
-                "expected_sectors": track["length"],
-                "output_path": (
-                    directory
-                    / (
-                        f"{prefix}{track['number']:02d}.iso"
-                        if track.get("kind", "audio") == "data"
-                        else f"{prefix}{track['number']:02d}.wav"
-                    )
-                ).resolve(),
-            }
-            for track in selected_tracks
-        ]
-
-    first_track = selected_tracks[0]
-
-    if (
-        len(selected_tracks) > 1
-        and any(
-            track.get("kind", "audio") == "data"
-            for track in selected_tracks
-        )
-    ):
-        raise RuntimeError(
-            "Data tracks can only be combined with other "
-            "tracks as separate files."
-        )
-
-    if first_track.get("kind", "audio") == "data":
-        output_path = (
-            Path(output).expanduser().resolve()
-            if output is not None
-            else (
-                directory
-                / f"{prefix}{first_track['number']:02d}.iso"
-            ).resolve()
-        )
-        return [
-            {
-                "track": first_track,
-                "kind": "data",
-                "component_tracks": [],
-                "expected_sectors": first_track["length"],
-                "output_path": output_path,
-            }
-        ]
-
-    output_sectors = sum(
-        track["length"]
-        for track in selected_tracks
-    )
-    wav_path = (
-        Path(output).expanduser().resolve()
-        if output is not None
-        else (
-            directory
-            / (
-                f"{prefix}{first_track['number']:02d}.wav"
-                if len(selected_tracks) == 1
-                else f"{prefix}.wav"
-            )
-        ).resolve()
-    )
-
-    return [
-        {
-            "track": None,
-            "kind": "audio",
-            "component_tracks": selected_tracks,
-            "expected_sectors": output_sectors,
-            "output_path": wav_path,
-        }
-    ]
 
 
 def segments_to_wav(
@@ -167,10 +66,6 @@ def segments_to_wav(
         print(
             f"Total sectors:       "
             f"{total_sectors:,}"
-        )
-        print(
-            f"Duration:            "
-            f"{sectors_to_msf(total_sectors)}"
         )
         print(
             f"Temporary WAV:       "
@@ -238,45 +133,3 @@ def segments_to_wav(
                     )
 
                     remaining -= count
-
-
-def remove_output_job_files(output_jobs):
-    for job in output_jobs:
-        for path in (
-            job["temporary_path"],
-            job["output_path"],
-        ):
-            if path.exists():
-                try:
-                    path.unlink()
-                except OSError:
-                    pass
-
-
-def create_output_files(output_jobs, verbose=False):
-    try:
-        for job in output_jobs:
-            if job["kind"] == "data":
-                data_track_to_iso(
-                    job["data_track"],
-                    job["temporary_path"],
-                    verbose=verbose,
-                )
-            else:
-                segments_to_wav(
-                    job["segments"],
-                    job["temporary_path"],
-                    job["expected_sectors"],
-                    verbose=verbose,
-                )
-
-        for job in output_jobs:
-            job["temporary_path"].replace(
-                job["output_path"]
-            )
-
-    except BaseException:
-        remove_output_job_files(
-            output_jobs
-        )
-        raise
