@@ -71,16 +71,22 @@ the adapter boundary and must not enter plans or application services.
 ### Disc layout sources
 
 Use MMC `READ TOC` format 0 to enumerate every numbered track, its audio/data
-control bit, its INDEX 01 start LBA, and lead-out. Derive each exclusive end
-from the next track's start or lead-out. `--show-layout` must display both
-audio and data tracks.
+control bit, its INDEX 01 start LBA, and final-session lead-out. Also use MMC
+full TOC format 2 to determine session membership and each session's lead-out.
+Derive each exclusive end from the next track's start when it is in the same
+session; a session's final track ends at that session's own lead-out.
+`--show-layout` must display both audio and data tracks.
 
 For now, also read the audio-only cdparanoia layout. Every MMC audio track must
-exist in cdparanoia, every cdparanoia track must be audio in MMC, and their
-`begin`, `end`, and `length` values must agree exactly. Fail closed on any
-disagreement. Continue to use the reconciled cdparanoia values for audio
-extraction until hardware validation explicitly authorizes removing that
-dependency.
+exist in cdparanoia and every cdparanoia track must be audio in MMC. Their
+`begin`, `end`, and `length` values must agree exactly except for the validated
+enhanced-CD case where cdparanoia extends the final audio track through an
+earlier session's lead-out/inter-session gap to a later-session data track. In
+that case, require the starts to agree, require cdparanoia's end to equal the
+later data track's start, and use the MMC full-TOC session lead-out as the
+audio end. Fail closed on every other disagreement. Continue to use the
+reconciled cdparanoia values for audio extraction until hardware validation
+explicitly authorizes removing that dependency.
 
 ### Logical range
 
@@ -200,6 +206,9 @@ Therefore:
 
 -   exclude selected Track N's INDEX 00 pregap;
 -   include Track N+1's INDEX 00 pregap.
+-   when Track N is the final track of an earlier session, stop at that
+    session's lead-out and exclude the lead-out, inter-session gap, and later
+    data-track pregap.
 
 Do not equate the desired output with the entirety of redumper's Track-N
 BIN. Split BINs may begin at INDEX 00. Parse the generated CUE and begin

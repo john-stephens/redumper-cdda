@@ -7,13 +7,13 @@ from tests.contracts.fakes import RecordingReporter
 
 
 class FakeRunner:
-    def __init__(self, result):
-        self.result = result
+    def __init__(self, *results):
+        self.results = iter(results)
         self.calls = []
 
     def capture(self, command, **kwargs):
         self.calls.append((command, kwargs))
-        return self.result
+        return next(self.results)
 
 
 class MmcTocReaderTests(unittest.TestCase):
@@ -26,8 +26,18 @@ class MmcTocReaderTests(unittest.TestCase):
         body = cls.descriptor(1, 150) + cls.descriptor(0xAA, 225)
         return (len(body) + 2).to_bytes(2, "big") + b"\x01\x01" + body
 
+    @staticmethod
+    def full_toc():
+        track = bytes((1, 0x10, 0, 1, 0, 0, 0, 0, 0, 4, 0))
+        leadout = bytes((1, 0x10, 0, 0xA2, 0, 0, 0, 0, 0, 5, 0))
+        body = track + leadout
+        return (len(body) + 2).to_bytes(2, "big") + b"\x01\x01" + body
+
     def test_reads_binary_mmc_toc_with_exact_command(self):
-        runner = FakeRunner(CommandResult((), 0, self.toc(), b""))
+        runner = FakeRunner(
+            CommandResult((), 0, self.toc(), b""),
+            CommandResult((), 0, self.full_toc(), b""),
+        )
         reporter = RecordingReporter()
         reader = MmcTocReader(runner, reporter)
 
@@ -46,7 +56,15 @@ class MmcTocReaderTests(unittest.TestCase):
                         "00", "03", "24", "00",
                     ],
                     {"text": False, "merge_stderr": False},
-                )
+                ),
+                (
+                    [
+                        "sg_raw", "--readonly", "--binary", "--request=4096",
+                        "/dev/sr0", "43", "02", "02", "00", "00", "00",
+                        "01", "10", "00", "00",
+                    ],
+                    {"text": False, "merge_stderr": False},
+                ),
             ],
         )
 
@@ -63,11 +81,26 @@ class MmcTocReaderTests(unittest.TestCase):
 
     def test_translates_invalid_toc_to_typed_error(self):
         reader = MmcTocReader(
-            FakeRunner(CommandResult((), 0, b"bad", b"")), RecordingReporter()
+            FakeRunner(
+                CommandResult((), 0, b"bad", b""),
+                CommandResult((), 0, self.full_toc(), b""),
+            ),
+            RecordingReporter(),
         )
         with self.assertRaisesRegex(TocParseError, "shorter than") as caught:
             reader.read("/dev/sr0")
         self.assertIsInstance(caught.exception.__cause__, RuntimeError)
+
+    def test_reports_full_toc_failure(self):
+        reader = MmcTocReader(
+            FakeRunner(
+                CommandResult((), 0, self.toc(), b""),
+                CommandResult((), 2, b"", b"full failed"),
+            ),
+            RecordingReporter(),
+        )
+        with self.assertRaisesRegex(LayoutError, "(?s)format 2 failed.*full failed"):
+            reader.read("/dev/sr0")
 
 
 if __name__ == "__main__":

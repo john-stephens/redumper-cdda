@@ -42,7 +42,38 @@ def parse_media_errors(output):
     if not matches:
         return None
 
-    _position, match = max(matches, key=lambda item: item[0])
+    position, match = max(matches, key=lambda item: item[0])
+    correction_pattern = re.compile(
+        r"correction statistics\s*:\s*"
+        r".*?"
+        r"SCSI\s*:\s*(\d+)"
+        r".*?"
+        r"C2\s*:\s*(\d+)"
+        r".*?"
+        r"Q\s*:\s*(\d+)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    corrections = [
+        correction
+        for correction in correction_pattern.finditer(output)
+        if correction.start() > position
+    ]
+    if corrections:
+        first_position = min(
+            candidate_position
+            for candidate_position, _candidate in matches
+        )
+        first = next(
+            candidate
+            for candidate_position, candidate in matches
+            if candidate_position == first_position
+        )
+        corrected = corrections[-1]
+        return {
+            "SCSI": max(0, int(first.group(1)) - int(corrected.group(1))),
+            "C2": max(0, int(first.group(2)) - int(corrected.group(2))),
+            "Q": int(match.group(3)),
+        }
     return {
         "SCSI": int(match.group(1)),
         "C2": int(match.group(2)),

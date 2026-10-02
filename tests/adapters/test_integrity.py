@@ -45,6 +45,17 @@ class IntegrityCoverageTests(unittest.TestCase):
             {"SCSI": 0, "C2": 310, "Q": 1175},
         )
 
+        completed_after_last_progress = (
+            "[ 2%] errors: { SCSIs: 0, C2s: 57, Q: 1680 }\n"
+            "[66%] errors: { SCSIs: 0, C2s: 32, Q: 1680 }\n"
+            "correction statistics:\n"
+            "  SCSI: 0 samples\n  C2: 57 samples\n  Q: 0 sectors\n"
+        )
+        self.assertEqual(
+            self.module.parse_media_errors(completed_after_last_progress),
+            {"SCSI": 0, "C2": 0, "Q": 1680},
+        )
+
         final_summary = output + (
             "media errors:\n  SCSI: 0 samples\n  C2: 12 samples\n  Q: 9\n"
         )

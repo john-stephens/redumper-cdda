@@ -124,7 +124,8 @@ protocol rather than introduce conditionals throughout the coordinator.
 
 -   `subprocess_runner.py`: child-process execution and interruption cleanup;
 -   `mmc.py` and `cdparanoia.py`: external layout readers;
--   `layout_provider.py`: exact MMC/cdparanoia reconciliation;
+-   `layout_provider.py`: exact MMC/cdparanoia reconciliation, including the
+    validated enhanced-CD session-lead-out exception;
 -   `redumper.py`: exact command construction, progress parsing, integrity
     parsing, and state inspection;
 -   `cue.py`: CUE parsing, discovery, and audio/data source resolution;

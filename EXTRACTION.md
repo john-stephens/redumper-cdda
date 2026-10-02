@@ -5,12 +5,15 @@ policy, and hardware-validated invariants used by `redumper-cdda`.
 
 ## Extraction algorithm
 
-An MMC `READ TOC` command supplies every track's INDEX 01 start, audio/data
-control bit, and the lead-out address. The next track's start, or lead-out for
-the final track, establishes each exclusive end. During this migration stage,
+MMC `READ TOC` format 0 supplies every track's INDEX 01 start, audio/data
+control bit, and the final-session lead-out. Full TOC format 2 supplies session
+membership and each session's own lead-out. The next track's start establishes
+an exclusive end only within the same session; the last track in an earlier
+session ends at that session's lead-out. During this migration stage,
 `cdparanoia -Q` independently supplies each audio track's `begin` and `length`.
-The command fails closed if the two sources disagree about any audio track's
-type or sector boundaries.
+The command fails closed if the two sources disagree, except for the validated
+enhanced-CD case where cdparanoia extends the last audio track to a later
+session's data-track start. In that case the full-TOC session lead-out wins.
 
 For a selected audio track:
 
@@ -23,6 +26,10 @@ The end is exclusive. The output begins at Track N **INDEX 01**,
 includes its program audio and the following track's **INDEX 00
 pregap**, and stops immediately before Track N+1 INDEX 01. The selected
 track's own INDEX 00 pregap is excluded.
+
+For the final audio track of an earlier session, output stops at that
+session's lead-out. It excludes the lead-out, inter-session gap, and the later
+data track's INDEX 00 pregap.
 
 For a range, `logical_start` is the first selected track's start and
 `logical_end` is the last selected track's exclusive end. redumper reads

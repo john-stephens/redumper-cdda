@@ -27,12 +27,23 @@ class ReconciledLayoutProvider:
             )
 
         reconciled = []
-        for mmc_track in mmc_layout.tracks:
+        for index, mmc_track in enumerate(mmc_layout.tracks):
             if mmc_track.kind is TrackKind.DATA:
                 reconciled.append(mmc_track)
                 continue
 
             audio_track = audio_by_number[mmc_track.number]
+            next_track = (
+                mmc_layout.tracks[index + 1]
+                if index + 1 < len(mmc_layout.tracks)
+                else None
+            )
+            session_boundary = (
+                next_track is not None
+                and next_track.kind is TrackKind.DATA
+                and mmc_track.end_lba < next_track.begin_lba
+                and audio_track.end_lba == next_track.begin_lba
+            )
             differences = []
             for field, mmc_value, audio_value in (
                 ("begin", mmc_track.begin_lba, audio_track.begin_lba),
@@ -43,7 +54,9 @@ class ReconciledLayoutProvider:
                     audio_track.length_sectors,
                 ),
             ):
-                if mmc_value != audio_value:
+                if mmc_value != audio_value and not (
+                    session_boundary and field in ("end", "length")
+                ):
                     differences.append(
                         f"{field}: MMC={mmc_value}, cdparanoia={audio_value}"
                     )
@@ -59,8 +72,16 @@ class ReconciledLayoutProvider:
                     kind=TrackKind.AUDIO,
                     control=mmc_track.control,
                     begin_lba=audio_track.begin_lba,
-                    end_lba=audio_track.end_lba,
-                    length_msf=audio_track.length_msf,
+                    end_lba=(
+                        mmc_track.end_lba
+                        if session_boundary
+                        else audio_track.end_lba
+                    ),
+                    length_msf=(
+                        mmc_track.length_msf
+                        if session_boundary
+                        else audio_track.length_msf
+                    ),
                     begin_msf=audio_track.begin_msf,
                 )
             )

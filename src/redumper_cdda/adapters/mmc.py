@@ -3,10 +3,11 @@
 from ..domain.disc import DiscLayout, Track, TrackKind
 from ..domain.errors import LayoutError, TocParseError
 from ..domain.events import LifecycleEvent
-from ..layout import parse_mmc_toc
+from ..layout import apply_session_boundaries, parse_mmc_full_toc, parse_mmc_toc
 
 
 MMC_TOC_ALLOCATION_LENGTH = 804
+MMC_FULL_TOC_ALLOCATION_LENGTH = 4096
 
 
 class MmcTocReader:
@@ -36,6 +37,28 @@ class MmcTocReader:
             "00",
         ]
 
+    @staticmethod
+    def full_toc_command(device):
+        allocation_msb = (MMC_FULL_TOC_ALLOCATION_LENGTH >> 8) & 0xFF
+        allocation_lsb = MMC_FULL_TOC_ALLOCATION_LENGTH & 0xFF
+        return [
+            "sg_raw",
+            "--readonly",
+            "--binary",
+            f"--request={MMC_FULL_TOC_ALLOCATION_LENGTH}",
+            device,
+            "43",
+            "02",
+            "02",
+            "00",
+            "00",
+            "00",
+            "01",
+            f"{allocation_msb:02x}",
+            f"{allocation_lsb:02x}",
+            "00",
+        ]
+
     def read(self, device):
         self._reporter.publish(
             LifecycleEvent(
@@ -43,8 +66,24 @@ class MmcTocReader:
             )
         )
 
+        result = self._capture(self.command(device), "MMC READ TOC")
+        full_toc_result = self._capture(
+            self.full_toc_command(device), "MMC READ TOC format 2"
+        )
+
+        try:
+            parsed = parse_mmc_toc(result.output)
+            parsed = apply_session_boundaries(
+                parsed, parse_mmc_full_toc(full_toc_result.output)
+            )
+            tracks = tuple(_track(item) for item in parsed)
+            return DiscLayout(tracks, tracks[-1].end_lba)
+        except RuntimeError as exc:
+            raise TocParseError(str(exc)) from exc
+
+    def _capture(self, command, label):
         result = self._runner.capture(
-            self.command(device),
+            command,
             text=False,
             merge_stderr=False,
         )
@@ -54,15 +93,10 @@ class MmcTocReader:
                 errors="replace",
             ).strip()
             raise LayoutError(
-                "MMC READ TOC failed"
+                f"{label} failed"
                 + ("\n\n" + details if details else "")
             )
-
-        try:
-            tracks = tuple(_track(item) for item in parse_mmc_toc(result.output))
-            return DiscLayout(tracks, tracks[-1].end_lba)
-        except RuntimeError as exc:
-            raise TocParseError(str(exc)) from exc
+        return result
 
 
 def _track(item):

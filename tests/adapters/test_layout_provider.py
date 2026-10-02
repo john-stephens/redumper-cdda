@@ -53,6 +53,19 @@ class ReconciledLayoutProviderTests(unittest.TestCase):
         self.assertIs(result.tracks[1], data)
         self.assertEqual(result.lead_out_lba, 200)
 
+    def test_uses_session_leadout_instead_of_later_data_track_start(self):
+        mmc_audio = self.track(1, TrackKind.AUDIO, 0, 100)
+        data = self.track(2, TrackKind.DATA, 200, 300, control=4)
+        cdparanoia_audio = self.track(1, TrackKind.AUDIO, 0, 200)
+
+        result = ReconciledLayoutProvider(
+            FakeReader(DiscLayout((mmc_audio, data), 300)),
+            FakeReader(AudioLayout((cdparanoia_audio,))),
+        ).read("drive")
+
+        self.assertEqual(result.track(1).end_lba, 100)
+        self.assertEqual(result.track(1).length_sectors, 100)
+
     def test_rejects_audio_track_set_disagreement(self):
         mmc = DiscLayout(
             (self.track(1, TrackKind.AUDIO, 0, 100),), 100

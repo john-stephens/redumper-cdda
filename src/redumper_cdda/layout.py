@@ -125,6 +125,97 @@ def parse_mmc_toc(data):
     return tracks
 
 
+def parse_mmc_full_toc(data):
+    """Return track-to-session and per-session lead-out data from format 2."""
+
+    if len(data) < 4:
+        raise RuntimeError("MMC full TOC response is shorter than its header.")
+    response_length = int.from_bytes(data[0:2], byteorder="big") + 2
+    if response_length > len(data):
+        raise RuntimeError("MMC full TOC response is truncated.")
+    descriptor_data = data[4:response_length]
+    if not descriptor_data or len(descriptor_data) % 11:
+        raise RuntimeError("MMC full TOC response has malformed descriptors.")
+
+    track_sessions = {}
+    session_leadouts = {}
+    for offset in range(0, len(descriptor_data), 11):
+        descriptor = descriptor_data[offset:offset + 11]
+        session = descriptor[0]
+        adr = descriptor[1] >> 4
+        point = descriptor[3]
+        if adr != 1:
+            continue
+        if 1 <= point <= 99:
+            previous = track_sessions.setdefault(point, session)
+            if previous != session:
+                raise RuntimeError(
+                    f"MMC full TOC assigns Track {point} to multiple sessions."
+                )
+        elif point == 0xA2:
+            leadout = (
+                (descriptor[8] * 60 + descriptor[9]) * SECTORS_PER_SECOND
+                + descriptor[10]
+                - 150
+            )
+            previous = session_leadouts.setdefault(session, leadout)
+            if previous != leadout:
+                raise RuntimeError(
+                    f"MMC full TOC contains conflicting Session {session} lead-outs."
+                )
+
+    if not track_sessions:
+        raise RuntimeError("MMC full TOC contains no track descriptors.")
+    missing_leadouts = set(track_sessions.values()) - set(session_leadouts)
+    if missing_leadouts:
+        sessions = ", ".join(str(item) for item in sorted(missing_leadouts))
+        raise RuntimeError(
+            f"MMC full TOC is missing lead-out data for session(s): {sessions}."
+        )
+    return track_sessions, session_leadouts
+
+
+def apply_session_boundaries(tracks, full_toc):
+    """End a session's final track at that session's own lead-out."""
+
+    track_sessions, session_leadouts = full_toc
+    numbers = [track["number"] for track in tracks]
+    missing = [number for number in numbers if number not in track_sessions]
+    if missing:
+        labels = ", ".join(str(number) for number in missing)
+        raise RuntimeError(f"MMC full TOC is missing Track(s): {labels}.")
+
+    adjusted = []
+    for index, track in enumerate(tracks):
+        session = track_sessions[track["number"]]
+        next_session = (
+            track_sessions[tracks[index + 1]["number"]]
+            if index + 1 < len(tracks)
+            else session
+        )
+        end = track["end"]
+        if next_session != session:
+            if next_session < session:
+                raise RuntimeError("MMC full TOC sessions are out of order.")
+            end = session_leadouts[session]
+        if end <= track["begin"] or (
+            index + 1 < len(tracks) and end > tracks[index + 1]["begin"]
+        ):
+            raise RuntimeError(
+                f"MMC full TOC has an invalid end for Track {track['number']}."
+            )
+        length = end - track["begin"]
+        adjusted.append(
+            {
+                **track,
+                "end": end,
+                "length": length,
+                "length_msf": sectors_to_msf(length),
+            }
+        )
+    return adjusted
+
+
 def parse_cdparanoia_toc(text):
     tracks = []
     pattern = re.compile(
