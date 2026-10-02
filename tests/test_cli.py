@@ -1,7 +1,10 @@
-import importlib.machinery
-import importlib.util
+"""Tests for the command-line interface and extraction orchestration."""
+
+import builtins
+import importlib
 import io
 import os
+import runpy
 import signal
 import shutil
 import subprocess
@@ -9,37 +12,46 @@ import sys
 import tempfile
 import threading
 import unittest
+import warnings
 from argparse import Namespace
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
 
 SCRIPT_PATH = (
-    Path(__file__).parent
+    Path(__file__).parent.parent
     / "src"
     / "redumper_cdda"
     / "cli.py"
 )
+SRC_PATH = SCRIPT_PATH.parents[1]
+
+if str(SRC_PATH) not in sys.path:
+    sys.path.insert(0, str(SRC_PATH))
+
+from redumper_cdda import (
+    accuraterip,
+    cue,
+    integrity,
+    iso9660,
+    layout,
+    outputs,
+    workflow,
+)
 
 
 def load_script():
-    loader = importlib.machinery.SourceFileLoader(
-        "redumper_cdda",
-        str(SCRIPT_PATH),
-    )
-    spec = importlib.util.spec_from_loader(
-        loader.name,
-        loader,
-    )
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    return module
+    import redumper_cdda.cli
+
+    return importlib.reload(redumper_cdda.cli)
 
 
 class TemporaryWorkspaceTests(unittest.TestCase):
     def setUp(self):
         self.module = load_script()
+        self.outputs = importlib.reload(outputs)
+        self.workflow = importlib.reload(workflow)
 
     def run_main(self, extract_track):
         arguments = [
@@ -199,7 +211,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
 
         with redirect_stdout(output):
             returncode, captured = (
-                self.module.run_command_capture(
+                workflow.run_command_capture(
                     [
                         sys.executable,
                         "-c",
@@ -244,7 +256,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
 
         with redirect_stdout(output):
             returncode, _captured = (
-                self.module.run_command_capture(
+                workflow.run_command_capture(
                     [
                         sys.executable,
                         "-c",
@@ -294,7 +306,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
 
         with redirect_stdout(output):
             returncode, _captured = (
-                self.module.run_command_capture(
+                workflow.run_command_capture(
                     [
                         sys.executable,
                         "-c",
@@ -328,7 +340,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
         )
 
     def test_progress_labels_selected_data_track(self):
-        label = self.module.format_progress_label(
+        label = workflow.format_progress_label(
             "Reading",
             1,
             [
@@ -349,7 +361,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
 
         with redirect_stdout(output):
             returncode, _captured = (
-                self.module.run_command_capture(
+                workflow.run_command_capture(
                     [
                         sys.executable,
                         "-c",
@@ -371,7 +383,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
 
         with redirect_stdout(output):
             returncode, captured = (
-                self.module.run_command_capture(
+                workflow.run_command_capture(
                     [
                         sys.executable,
                         "-c",
@@ -406,19 +418,19 @@ class TemporaryWorkspaceTests(unittest.TestCase):
         }
 
         self.assertFalse(
-            self.module.should_abort_on_errors(
+            integrity.should_abort_on_errors(
                 clean,
                 True,
             )
         )
         self.assertFalse(
-            self.module.should_abort_on_errors(
+            integrity.should_abort_on_errors(
                 unresolved,
                 False,
             )
         )
         self.assertTrue(
-            self.module.should_abort_on_errors(
+            integrity.should_abort_on_errors(
                 unresolved,
                 True,
             )
@@ -426,13 +438,13 @@ class TemporaryWorkspaceTests(unittest.TestCase):
 
     def test_split_write_offsets_parse_constant_and_shifted(self):
         self.assertEqual(
-            self.module.parse_split_write_offsets(
+            integrity.parse_split_write_offsets(
                 "disc write offset: +48\n"
             ),
             [(0, 48)],
         )
         self.assertEqual(
-            self.module.parse_split_write_offsets(
+            integrity.parse_split_write_offsets(
                 "disc write offset: -12\n\n"
                 "offset shift correction applied:\n"
                 "  LBA:      0, offset: -12\n"
@@ -445,7 +457,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             RuntimeError,
             "offset-shift boundaries",
         ):
-            self.module.parse_split_write_offsets(
+            integrity.parse_split_write_offsets(
                 "disc write offset: +48\n"
                 "offset shift correction applied:\n"
                 "  changed format\n"
@@ -468,19 +480,19 @@ class TemporaryWorkspaceTests(unittest.TestCase):
         ]
         offset = 48
         first_sample = (
-            (tracks[0]["begin"] - self.module.REDUMPER_LBA_START)
-            * self.module.SAMPLES_PER_SECTOR
+            (tracks[0]["begin"] - integrity.REDUMPER_LBA_START)
+            * integrity.SAMPLES_PER_SECTOR
             + offset
         )
         states = bytearray(
-            [self.module.REDUMPER_MAX_STATE]
-            * (4 * self.module.SAMPLES_PER_SECTOR)
+            [integrity.REDUMPER_MAX_STATE]
+            * (4 * integrity.SAMPLES_PER_SECTOR)
         )
-        states[self.module.SAMPLES_PER_SECTOR] = (
-            self.module.REDUMPER_ERROR_SKIP
+        states[integrity.SAMPLES_PER_SECTOR] = (
+            integrity.REDUMPER_ERROR_SKIP
         )
-        states[2 * self.module.SAMPLES_PER_SECTOR] = (
-            self.module.REDUMPER_ERROR_C2
+        states[2 * integrity.SAMPLES_PER_SECTOR] = (
+            integrity.REDUMPER_ERROR_C2
         )
 
         with tempfile.TemporaryDirectory() as directory:
@@ -489,7 +501,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                 state_file.seek(first_sample)
                 state_file.write(states)
 
-            result = self.module.inspect_track_media_errors(
+            result = integrity.inspect_track_media_errors(
                 state_path,
                 tracks,
                 [(0, offset)],
@@ -556,7 +568,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             ]
         )
 
-        tracks = self.module.parse_mmc_toc(
+        tracks = layout.parse_mmc_toc(
             response
         )
 
@@ -586,7 +598,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             RuntimeError,
             "truncated",
         ):
-            self.module.parse_mmc_toc(
+            layout.parse_mmc_toc(
                 response[:-1]
             )
 
@@ -624,7 +636,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             }
         ]
 
-        tracks = self.module.reconcile_disc_layout(
+        tracks = layout.reconcile_disc_layout(
             mmc_tracks,
             audio_tracks,
         )
@@ -666,7 +678,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             RuntimeError,
             "boundaries disagree",
         ):
-            self.module.reconcile_disc_layout(
+            layout.reconcile_disc_layout(
                 mmc_tracks,
                 audio_tracks,
             )
@@ -687,12 +699,12 @@ class TemporaryWorkspaceTests(unittest.TestCase):
 
         with (
             mock.patch.object(
-                self.module,
+                self.workflow,
                 "read_mmc_toc",
                 return_value=data_tracks,
             ),
             mock.patch.object(
-                self.module,
+                self.workflow,
                 "read_disc_toc",
             ) as read_audio_toc,
         ):
@@ -744,7 +756,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             }
         ]
 
-        track = self.module.find_requested_track(
+        track = layout.find_requested_track(
             tracks,
             0,
         )
@@ -769,7 +781,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             RuntimeError,
             "Track 0 does not exist",
         ):
-            self.module.find_requested_track(
+            layout.find_requested_track(
                 tracks,
                 0,
             )
@@ -788,11 +800,11 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                 encoding="utf-8",
             )
             bin_path.write_bytes(
-                bytes(301 * self.module.SECTOR_SIZE)
+                bytes(301 * outputs.SECTOR_SIZE)
             )
 
             segments, selected_cue, skipped = (
-                self.module.identify_generated_audio_segments(
+                cue.identify_generated_audio_segments(
                     workdir,
                     "track00",
                     [cue_path, bin_path],
@@ -827,14 +839,14 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                 encoding="utf-8",
             )
             bin_path.write_bytes(
-                bytes(301 * self.module.SECTOR_SIZE)
+                bytes(301 * outputs.SECTOR_SIZE)
             )
 
             with self.assertRaisesRegex(
                 RuntimeError,
                 "expected 299 from cdparanoia",
             ):
-                self.module.identify_generated_audio_segments(
+                cue.identify_generated_audio_segments(
                     workdir,
                     "track00",
                     [cue_path, bin_path],
@@ -845,11 +857,11 @@ class TemporaryWorkspaceTests(unittest.TestCase):
     def make_mode1_raw_sector(self, payload=None):
         if payload is None:
             payload = bytes(
-                self.module.ISO_SECTOR_SIZE
+                iso9660.ISO_SECTOR_SIZE
             )
 
         sector = bytearray(
-            self.module.SECTOR_SIZE
+            outputs.SECTOR_SIZE
         )
         sector[:12] = (
             b"\x00"
@@ -857,12 +869,12 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             + b"\x00"
         )
         sector[15] = 1
-        sector[16:16 + self.module.ISO_SECTOR_SIZE] = payload
+        sector[16:16 + iso9660.ISO_SECTOR_SIZE] = payload
         return bytes(sector)
 
     def make_iso9660_payloads(self, volume_sectors=20):
         payloads = [
-            bytearray(self.module.ISO_SECTOR_SIZE)
+            bytearray(iso9660.ISO_SECTOR_SIZE)
             for _ in range(volume_sectors)
         ]
         primary = payloads[16]
@@ -878,13 +890,13 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             byteorder="big",
         )
         primary[128:130] = (
-            self.module.ISO_SECTOR_SIZE.to_bytes(
+            iso9660.ISO_SECTOR_SIZE.to_bytes(
                 2,
                 byteorder="little",
             )
         )
         primary[130:132] = (
-            self.module.ISO_SECTOR_SIZE.to_bytes(
+            iso9660.ISO_SECTOR_SIZE.to_bytes(
                 2,
                 byteorder="big",
             )
@@ -900,11 +912,11 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             4,
             byteorder="big",
         )
-        root[10:14] = self.module.ISO_SECTOR_SIZE.to_bytes(
+        root[10:14] = iso9660.ISO_SECTOR_SIZE.to_bytes(
             4,
             byteorder="little",
         )
-        root[14:18] = self.module.ISO_SECTOR_SIZE.to_bytes(
+        root[14:18] = iso9660.ISO_SECTOR_SIZE.to_bytes(
             4,
             byteorder="big",
         )
@@ -935,11 +947,11 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                 encoding="utf-8",
             )
             bin_path.write_bytes(
-                bytes(3 * self.module.SECTOR_SIZE)
+                bytes(3 * outputs.SECTOR_SIZE)
             )
 
             data_track = (
-                self.module.identify_generated_data_track(
+                cue.identify_generated_data_track(
                     workdir,
                     "track01",
                     [cue_path, bin_path],
@@ -997,15 +1009,15 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                 fixture_bytes = fixture_path.read_bytes()
                 self.assertEqual(
                     len(fixture_bytes)
-                    % self.module.ISO_SECTOR_SIZE,
+                    % iso9660.ISO_SECTOR_SIZE,
                     0,
                 )
                 payloads = [
-                    fixture_bytes[offset:offset + self.module.ISO_SECTOR_SIZE]
+                    fixture_bytes[offset:offset + iso9660.ISO_SECTOR_SIZE]
                     for offset in range(
                         0,
                         len(fixture_bytes),
-                        self.module.ISO_SECTOR_SIZE,
+                        iso9660.ISO_SECTOR_SIZE,
                     )
                 ]
             else:
@@ -1023,12 +1035,12 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                 "path": bin_path,
                 "track": 1,
                 "track_type": "MODE1/2352",
-                "sector_size": self.module.SECTOR_SIZE,
+                "sector_size": outputs.SECTOR_SIZE,
                 "start_sector": 0,
                 "sectors": len(payloads) + 1,
             }
 
-            self.module.data_track_to_iso(
+            iso9660.data_track_to_iso(
                 data_track,
                 iso_path,
             )
@@ -1043,7 +1055,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             )
             with iso_path.open("rb") as iso_file:
                 iso_file.seek(
-                    16 * self.module.ISO_SECTOR_SIZE
+                    16 * iso9660.ISO_SECTOR_SIZE
                 )
                 self.assertEqual(
                     iso_file.read(6),
@@ -1071,7 +1083,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
 
     def test_mode2_form1_payload_is_supported(self):
         sector = bytearray(
-            self.module.SECTOR_SIZE
+            outputs.SECTOR_SIZE
         )
         sector[:12] = (
             b"\x00"
@@ -1081,23 +1093,23 @@ class TemporaryWorkspaceTests(unittest.TestCase):
         sector[15] = 2
         sector[16:20] = b"\x01\x02\x08\x00"
         sector[20:24] = sector[16:20]
-        sector[24:24 + self.module.ISO_SECTOR_SIZE] = (
-            b"A" * self.module.ISO_SECTOR_SIZE
+        sector[24:24 + iso9660.ISO_SECTOR_SIZE] = (
+            b"A" * iso9660.ISO_SECTOR_SIZE
         )
 
-        payload = self.module.extract_iso_payload(
+        payload = iso9660.extract_iso_payload(
             bytes(sector),
             "MODE2/2352",
         )
 
         self.assertEqual(
             payload,
-            b"A" * self.module.ISO_SECTOR_SIZE,
+            b"A" * iso9660.ISO_SECTOR_SIZE,
         )
 
     def test_mode2_form2_payload_is_rejected(self):
         sector = bytearray(
-            self.module.SECTOR_SIZE
+            outputs.SECTOR_SIZE
         )
         sector[:12] = (
             b"\x00"
@@ -1112,7 +1124,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             RuntimeError,
             "Form 2",
         ):
-            self.module.extract_iso_payload(
+            iso9660.extract_iso_payload(
                 bytes(sector),
                 "MODE2/2352",
             )
@@ -1131,10 +1143,10 @@ class TemporaryWorkspaceTests(unittest.TestCase):
         ]
 
     def resolve_numbers(self, value):
-        selection = self.module.parse_track_selection(
+        selection = layout.parse_track_selection(
             value
         )
-        tracks = self.module.resolve_track_selection(
+        tracks = layout.resolve_track_selection(
             self.make_range_tracks(),
             selection,
         )
@@ -1466,7 +1478,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             calls["all"] = (offsets, lead_out)
             return "33333333"
 
-        disc_id = self.module.build_accuraterip_disc_id(
+        disc_id = accuraterip.build_accuraterip_disc_id(
             tracks,
             library={
                 "accuraterip_ids": accuraterip_ids,
@@ -1562,9 +1574,9 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             workdir = Path(directory)
             bin_path = workdir / "audio.bin"
             bin_path.write_bytes(
-                bytes(2 * self.module.SECTOR_SIZE)
+                bytes(2 * outputs.SECTOR_SIZE)
             )
-            report = self.module.verify_with_accuraterip(
+            report = accuraterip.verify_with_accuraterip(
                 tracks,
                 [
                     {
@@ -1620,7 +1632,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             RuntimeError,
             "Track 0 and data tracks are not tracked",
         ):
-            self.module.verify_with_accuraterip(
+            accuraterip.verify_with_accuraterip(
                 tracks,
                 [
                     {
@@ -1636,7 +1648,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             )
 
     def test_accuraterip_falls_back_to_arv1(self):
-        result = self.module.match_accuraterip_checksums(
+        result = accuraterip.match_accuraterip_checksums(
             0x11111111,
             0x22222222,
             {
@@ -1719,13 +1731,13 @@ class TemporaryWorkspaceTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 2)
 
     def test_combined_range_uses_one_track_wav(self):
-        tracks = self.module.resolve_track_selection(
+        tracks = layout.resolve_track_selection(
             self.make_range_tracks(),
-            self.module.parse_track_selection("1-3"),
+            layout.parse_track_selection("1-3"),
         )
 
         with tempfile.TemporaryDirectory() as directory:
-            jobs = self.module.build_output_jobs(
+            jobs = outputs.build_output_jobs(
                 tracks,
                 True,
                 output_directory=directory,
@@ -1742,13 +1754,13 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             )
 
     def test_default_range_uses_track_numbered_wavs(self):
-        tracks = self.module.resolve_track_selection(
+        tracks = layout.resolve_track_selection(
             self.make_range_tracks(),
-            self.module.parse_track_selection("1-3"),
+            layout.parse_track_selection("1-3"),
         )
 
         with tempfile.TemporaryDirectory() as directory:
-            jobs = self.module.build_output_jobs(
+            jobs = outputs.build_output_jobs(
                 tracks,
                 False,
                 output_directory=directory,
@@ -1772,7 +1784,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
         tracks[1]["kind"] = "data"
 
         with tempfile.TemporaryDirectory() as directory:
-            jobs = self.module.build_output_jobs(
+            jobs = outputs.build_output_jobs(
                 tracks,
                 False,
                 output_directory=directory,
@@ -1788,7 +1800,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
         tracks = self.make_range_tracks()[:2]
 
         with tempfile.TemporaryDirectory() as directory:
-            jobs = self.module.build_output_jobs(
+            jobs = outputs.build_output_jobs(
                 tracks,
                 True,
                 output_directory=directory,
@@ -1843,9 +1855,9 @@ class TemporaryWorkspaceTests(unittest.TestCase):
         tracks[1]["kind"] = "audio"
         tracks[2]["kind"] = "data"
 
-        selected = self.module.resolve_disc_selection(
+        selected = layout.resolve_disc_selection(
             tracks,
-            self.module.parse_track_selection("-"),
+            layout.parse_track_selection("-"),
             include_data=True,
         )
 
@@ -1861,7 +1873,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
         tracks[2]["kind"] = "data"
 
         with tempfile.TemporaryDirectory() as directory:
-            jobs = self.module.build_output_jobs(
+            jobs = outputs.build_output_jobs(
                 tracks,
                 False,
                 output_directory=directory,
@@ -1885,7 +1897,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
         track["kind"] = "data"
 
         with tempfile.TemporaryDirectory() as directory:
-            jobs = self.module.build_output_jobs(
+            jobs = outputs.build_output_jobs(
                 [track],
                 True,
                 output_directory=directory,
@@ -1905,7 +1917,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             RuntimeError,
             "one explicit data track",
         ):
-            self.module.validate_data_output_mode(
+            layout.validate_data_output_mode(
                 [track],
                 include_data=True,
                 single_file=True,
@@ -1939,7 +1951,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                     raise RuntimeError("conversion failed")
 
             with mock.patch.object(
-                self.module,
+                self.outputs,
                 "data_track_to_iso",
                 side_effect=convert,
             ):
@@ -1947,7 +1959,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                     RuntimeError,
                     "conversion failed",
                 ):
-                    self.module.create_output_files(
+                    outputs.create_output_files(
                         jobs
                     )
 
@@ -1976,7 +1988,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                     ]
                 )
                 (workdir / bin_name).write_bytes(
-                    bytes(100 * self.module.SECTOR_SIZE)
+                    bytes(100 * outputs.SECTOR_SIZE)
                 )
 
             cue_path.write_text(
@@ -1985,7 +1997,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             )
 
             segments, _cue, skipped = (
-                self.module.identify_generated_audio_segments(
+                cue.identify_generated_audio_segments(
                     workdir,
                     "tracks01-03",
                     [cue_path],
@@ -2031,7 +2043,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                 refine_passes=3,
                 retries=100,
                 single_file=False,
-                track=self.module.parse_track_selection(
+                track=layout.parse_track_selection(
                     "1-2"
                 ),
                 verbose=False,
@@ -2045,27 +2057,27 @@ class TemporaryWorkspaceTests(unittest.TestCase):
 
             with (
                 mock.patch.object(
-                    self.module,
+                    self.workflow,
                     "read_disc_layout",
                     return_value=tracks,
                 ),
                 mock.patch.object(
-                    self.module,
+                    self.workflow,
                     "build_output_jobs",
                     return_value=output_jobs,
                 ),
                 mock.patch.object(
-                    self.module,
+                    self.workflow,
                     "run_command_capture",
                     return_value=(0, clean_output),
                 ) as run_capture,
                 mock.patch.object(
-                    self.module,
+                    self.workflow,
                     "identify_generated_audio_segments",
                     return_value=([], workdir / "disc.cue", 0),
                 ) as identify,
                 mock.patch.object(
-                    self.module,
+                    self.outputs,
                     "segments_to_wav",
                     side_effect=lambda _segments, path, _sectors, **_kwargs: (
                         path.write_bytes(b"wav")
@@ -2089,7 +2101,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             workdir = Path(directory)
-            output_jobs = self.module.build_output_jobs(
+            output_jobs = outputs.build_output_jobs(
                 tracks,
                 False,
                 output_directory=workdir,
@@ -2104,7 +2116,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                 refine_passes=0,
                 retries=100,
                 single_file=False,
-                track=self.module.parse_track_selection("1-2"),
+                track=layout.parse_track_selection("1-2"),
                 verbose=False,
             )
             dirty_output = (
@@ -2131,17 +2143,17 @@ class TemporaryWorkspaceTests(unittest.TestCase):
 
             with (
                 mock.patch.object(
-                    self.module,
+                    self.workflow,
                     "read_disc_layout",
                     return_value=tracks,
                 ),
                 mock.patch.object(
-                    self.module,
+                    self.workflow,
                     "build_output_jobs",
                     return_value=output_jobs,
                 ),
                 mock.patch.object(
-                    self.module,
+                    self.workflow,
                     "run_command_capture",
                     side_effect=[
                         (0, dirty_output),
@@ -2149,17 +2161,17 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                     ],
                 ) as run_capture,
                 mock.patch.object(
-                    self.module,
+                    self.workflow,
                     "inspect_track_media_errors",
                     return_value=per_track_errors,
                 ),
                 mock.patch.object(
-                    self.module,
+                    self.workflow,
                     "identify_generated_audio_segments",
                     return_value=([], workdir / "disc.cue", 0),
                 ) as identify,
                 mock.patch.object(
-                    self.module,
+                    self.outputs,
                     "segments_to_wav",
                     side_effect=lambda _segments, path, _sectors, **_kwargs: (
                         path.write_bytes(b"wav")
@@ -2194,7 +2206,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             workdir = Path(directory)
-            output_jobs = self.module.build_output_jobs(
+            output_jobs = outputs.build_output_jobs(
                 tracks,
                 True,
                 output_directory=workdir,
@@ -2209,7 +2221,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                 refine_passes=0,
                 retries=100,
                 single_file=True,
-                track=self.module.parse_track_selection("1-2"),
+                track=layout.parse_track_selection("1-2"),
                 verbose=False,
             )
             dirty_output = (
@@ -2221,22 +2233,22 @@ class TemporaryWorkspaceTests(unittest.TestCase):
 
             with (
                 mock.patch.object(
-                    self.module,
+                    self.workflow,
                     "read_disc_layout",
                     return_value=tracks,
                 ),
                 mock.patch.object(
-                    self.module,
+                    self.workflow,
                     "build_output_jobs",
                     return_value=output_jobs,
                 ),
                 mock.patch.object(
-                    self.module,
+                    self.workflow,
                     "run_command_capture",
                     return_value=(0, dirty_output),
                 ) as run_capture,
                 mock.patch.object(
-                    self.module,
+                    self.outputs,
                     "segments_to_wav",
                 ) as write_wav,
                 self.assertRaisesRegex(
@@ -2284,7 +2296,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                 refine_passes=3,
                 retries=100,
                 single_file=True,
-                track=self.module.parse_track_selection("1"),
+                track=layout.parse_track_selection("1"),
                 verbose=False,
             )
             clean_output = (
@@ -2296,27 +2308,27 @@ class TemporaryWorkspaceTests(unittest.TestCase):
 
             with (
                 mock.patch.object(
-                    self.module,
+                    self.workflow,
                     "read_disc_layout",
                     return_value=[track],
                 ),
                 mock.patch.object(
-                    self.module,
+                    self.workflow,
                     "build_output_jobs",
                     return_value=output_jobs,
                 ),
                 mock.patch.object(
-                    self.module,
+                    self.workflow,
                     "run_command_capture",
                     return_value=(0, clean_output),
                 ),
                 mock.patch.object(
-                    self.module,
+                    self.workflow,
                     "identify_generated_audio_segments",
                     return_value=([], workdir / "disc.cue", 0),
                 ),
                 mock.patch.object(
-                    self.module,
+                    self.outputs,
                     "segments_to_wav",
                     side_effect=(
                         lambda _segments, path, _sectors, **_kwargs: (
@@ -2325,7 +2337,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                     ),
                 ),
                 mock.patch.object(
-                    self.module,
+                    self.workflow,
                     "verify_with_accuraterip",
                     side_effect=RuntimeError("lookup failed"),
                 ),
@@ -2351,7 +2363,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             workdir = Path(directory)
-            output_jobs = self.module.build_output_jobs(
+            output_jobs = outputs.build_output_jobs(
                 tracks,
                 False,
                 output_directory=workdir,
@@ -2366,7 +2378,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                 refine_passes=3,
                 retries=100,
                 single_file=False,
-                track=self.module.parse_track_selection(
+                track=layout.parse_track_selection(
                     "1-2"
                 ),
                 verbose=False,
@@ -2382,46 +2394,46 @@ class TemporaryWorkspaceTests(unittest.TestCase):
                 "path": workdir / "track01.bin",
                 "track": 1,
                 "track_type": "MODE1/2352",
-                "sector_size": self.module.SECTOR_SIZE,
+                "sector_size": outputs.SECTOR_SIZE,
                 "start_sector": 0,
                 "sectors": 20,
             }
 
             with (
                 mock.patch.object(
-                    self.module,
+                    self.workflow,
                     "read_disc_layout",
                     return_value=tracks,
                 ),
                 mock.patch.object(
-                    self.module,
+                    self.workflow,
                     "build_output_jobs",
                     return_value=output_jobs,
                 ),
                 mock.patch.object(
-                    self.module,
+                    self.workflow,
                     "run_command_capture",
                     return_value=(0, clean_output),
                 ) as run_capture,
                 mock.patch.object(
-                    self.module,
+                    self.workflow,
                     "identify_generated_data_track",
                     return_value=data_track,
                 ) as identify_data,
                 mock.patch.object(
-                    self.module,
+                    self.workflow,
                     "identify_generated_audio_segments",
                     return_value=([], workdir / "disc.cue", 0),
                 ) as identify_audio,
                 mock.patch.object(
-                    self.module,
+                    self.outputs,
                     "data_track_to_iso",
                     side_effect=lambda _track, path, **_kwargs: (
                         path.write_bytes(b"iso")
                     ),
                 ) as write_iso,
                 mock.patch.object(
-                    self.module,
+                    self.outputs,
                     "segments_to_wav",
                     side_effect=lambda _segments, path, _sectors, **_kwargs: (
                         path.write_bytes(b"wav")
@@ -2454,9 +2466,9 @@ class TemporaryWorkspaceTests(unittest.TestCase):
     def test_open_range_omits_data_tracks(self):
         tracks = self.make_range_tracks()[1:3]
 
-        selected = self.module.resolve_track_selection(
+        selected = layout.resolve_track_selection(
             tracks,
-            self.module.parse_track_selection("-3"),
+            layout.parse_track_selection("-3"),
         )
 
         self.assertEqual(
@@ -2471,9 +2483,9 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             RuntimeError,
             "Audio track 1 was not found",
         ):
-            self.module.resolve_track_selection(
+            layout.resolve_track_selection(
                 tracks,
-                self.module.parse_track_selection("1-3"),
+                layout.parse_track_selection("1-3"),
             )
 
     def test_sigterm_stops_child_and_removes_workspace(self):
@@ -2499,7 +2511,7 @@ class TemporaryWorkspaceTests(unittest.TestCase):
             timer.start()
 
             try:
-                self.module.run_command(
+                workflow.run_command(
                     [
                         sys.executable,
                         "-c",
@@ -2527,6 +2539,184 @@ class TemporaryWorkspaceTests(unittest.TestCase):
         self.assertFalse(
             workspaces[0].exists()
         )
+
+
+class CliCoverageTests(unittest.TestCase):
+    def setUp(self):
+        self.module = load_script()
+
+    @staticmethod
+    def audio_track(number=1):
+        return {
+            "number": number,
+            "kind": "audio",
+            "begin": (number - 1) * 10,
+            "end": number * 10,
+            "length": 10,
+            "length_msf": "00:00.10",
+        }
+
+    def library(self, database=None, checksum_error=None):
+        fetch = mock.Mock()
+        fetch.from_id.return_value.fetch.return_value = database
+        checksums = mock.Mock(arv1=1, arv2=2)
+        get_checksums = mock.Mock(return_value=checksums)
+        if checksum_error is not None:
+            get_checksums.side_effect = checksum_error
+        return {
+            "get_checksums": get_checksums,
+            "fetcher": fetch,
+            "accuraterip_ids": mock.Mock(return_value=(11, 22)),
+            "freedb_id": mock.Mock(return_value=33),
+        }
+
+    def test_output_job_mixed_single_file_and_selected_report(self):
+        audio = self.audio_track()
+        data = dict(audio, number=2, kind="data")
+        with self.assertRaisesRegex(RuntimeError, "Data tracks can only"):
+            outputs.build_output_jobs([audio, data], True)
+        with redirect_stdout(io.StringIO()) as output:
+            workflow.print_selected_track(audio)
+        self.assertIn("Selected track", output.getvalue())
+
+    def test_main_validation_and_missing_tools(self):
+        cases = [
+            (["dev", "--retries=-1"], "invalid retry"),
+            (["dev", "--refine-passes=-1"], "invalid refine"),
+        ]
+        for arguments, message in cases:
+            with self.subTest(arguments=arguments):
+                with (
+                    mock.patch.object(sys, "argv", ["cmd", *arguments]),
+                    self.assertRaisesRegex(SystemExit, message),
+                ):
+                    self.module.main()
+
+        for prefix in ("", ".", "../bad"):
+            with self.subTest(prefix=prefix):
+                with (
+                    mock.patch.object(sys, "argv", ["cmd", "dev", "--prefix", prefix]),
+                    redirect_stdout(io.StringIO()),
+                    redirect_stderr(io.StringIO()),
+                    self.assertRaises(SystemExit),
+                ):
+                    self.module.main()
+
+        for missing, message in (("cdparanoia", "cdparanoia"), ("sg_raw", "sg_raw"), ("redumper", "redumper")):
+            with self.subTest(missing=missing):
+                def which(name, missing=missing):
+                    return None if name == missing else "/mock/tool"
+
+                with (
+                    mock.patch.object(sys, "argv", ["cmd", "dev", "--no-accuraterip"]),
+                    mock.patch.object(self.module.shutil, "which", side_effect=which),
+                    self.assertRaisesRegex(SystemExit, message),
+                ):
+                    self.module.main()
+
+    def test_main_layout_failure_output_error_and_verbose_workspace(self):
+        with (
+            mock.patch.object(sys, "argv", ["cmd", "dev", "--show-layout"]),
+            mock.patch.object(self.module.shutil, "which", return_value="/mock/tool"),
+            mock.patch.object(self.module, "read_disc_layout", side_effect=RuntimeError("bad toc")),
+            self.assertRaisesRegex(SystemExit, "bad toc"),
+        ):
+            self.module.main()
+
+        with (
+            mock.patch.object(sys, "argv", ["cmd", "dev", "--output", "x.wav"]),
+            mock.patch.object(self.module.shutil, "which", return_value="/mock/tool"),
+            redirect_stdout(io.StringIO()),
+            redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit),
+        ):
+            self.module.main()
+
+        with (
+            mock.patch.object(sys, "argv", ["cmd", "dev", "-v", "--no-accuraterip"]),
+            mock.patch.object(self.module.shutil, "which", return_value="/mock/tool"),
+            mock.patch.object(self.module, "extract_track") as extract,
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            self.module.main()
+        self.assertTrue(extract.called)
+        self.assertIn("Temporary workspace:", output.getvalue())
+        self.assertIn("workspace removed", output.getvalue())
+
+    def test_main_quiet_layout_does_not_print(self):
+        with (
+            mock.patch.object(sys, "argv", ["cmd", "dev", "--show-layout", "--quiet"]),
+            mock.patch.object(self.module.shutil, "which", return_value="/mock/tool"),
+            mock.patch.object(self.module, "read_disc_layout", return_value=[]),
+            mock.patch.object(self.module, "print_disc_layout") as print_layout,
+        ):
+            self.module.main()
+        print_layout.assert_not_called()
+
+
+class CliSignalCoverageTests(unittest.TestCase):
+    def setUp(self):
+        self.module = load_script()
+
+    def test_run_translates_interrupts(self):
+        with (
+            mock.patch.object(self.module, "install_signal_handlers"),
+            mock.patch.object(self.module, "main", side_effect=KeyboardInterrupt),
+            self.assertRaisesRegex(SystemExit, "Interrupted"),
+        ):
+            self.module.run()
+
+        termination = self.module.TerminationRequested(self.module.signal.SIGTERM)
+        with (
+            mock.patch.object(self.module, "install_signal_handlers"),
+            mock.patch.object(self.module, "main", side_effect=termination),
+            self.assertRaisesRegex(SystemExit, "SIGTERM"),
+        ):
+            self.module.run()
+
+    def test_signal_handler_skips_unavailable_signal(self):
+        class FakeSignal:
+            SIGTERM = 15
+
+            def __init__(self):
+                self.signal = mock.Mock()
+
+        fake_signal = FakeSignal()
+        with mock.patch.object(self.module, "signal", fake_signal):
+            self.module.install_signal_handlers()
+        self.assertEqual(fake_signal.signal.call_count, 1)
+
+
+class PackageEntrypointCoverageTests(unittest.TestCase):
+    def test_package_and_module_entrypoints(self):
+        source = str(Path(__file__).parent.parent / "src")
+        sys.path.insert(0, source)
+        try:
+            package = importlib.import_module("redumper_cdda")
+            self.assertEqual(package.__version__, "0.1.0")
+            with mock.patch("redumper_cdda.cli.run") as run:
+                runpy.run_module("redumper_cdda.__main__", run_name="not_main")
+                run.assert_not_called()
+                runpy.run_module("redumper_cdda.__main__", run_name="__main__")
+                run.assert_called_once_with()
+        finally:
+            sys.path.remove(source)
+
+    def test_cli_file_main_guard(self):
+        source = str(Path(__file__).parent.parent / "src")
+        with (
+            mock.patch.object(sys, "argv", ["redumper_cdda.cli", "--help"]),
+            redirect_stdout(io.StringIO()),
+            self.assertRaises(SystemExit) as caught,
+        ):
+            sys.path.insert(0, source)
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", RuntimeWarning)
+                    runpy.run_module("redumper_cdda.cli", run_name="__main__")
+            finally:
+                sys.path.remove(source)
+        self.assertEqual(caught.exception.code, 0)
 
 
 if __name__ == "__main__":

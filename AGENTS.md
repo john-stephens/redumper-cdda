@@ -381,6 +381,21 @@ successfully completed final outputs.
 
 ## Tests Codex should add/maintain
 
+Maintain 100% statement and branch coverage after every change. Add or update
+tests whenever behavior or executable paths change, and verify the enforced
+coverage threshold before completing the work:
+
+``` bash
+python -m coverage run -m unittest discover -s tests -v
+python -m coverage report
+```
+
+Keep unit tests in the top-level `tests/` directory. Test filenames must mirror
+their owning source modules under `src/redumper_cdda`; for example,
+`src/redumper_cdda/layout.py` is tested by `tests/test_layout.py`, and
+`src/redumper_cdda/cli.py` is tested by `tests/test_cli.py`. When moving code
+between source modules, move the corresponding unit tests at the same time.
+
 Prefer unit tests for pure parsing/range functions. Cover:
 
 -   MMC TOC parsing for audio tracks, data tracks, and lead-out;
