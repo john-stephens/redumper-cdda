@@ -14,9 +14,9 @@ REDUMPER_MAX_STATE = 4
 
 
 def parse_media_errors(output):
-    """Parse the last redumper ``media errors:`` block."""
+    """Parse redumper's latest complete current media-error status."""
 
-    pattern = re.compile(
+    summary_pattern = re.compile(
         r"media errors\s*:\s*"
         r".*?"
         r"SCSI\s*:\s*(\d+)"
@@ -26,12 +26,23 @@ def parse_media_errors(output):
         r"Q\s*:\s*(\d+)",
         re.IGNORECASE | re.DOTALL,
     )
-    matches = list(pattern.finditer(output))
+    progress_pattern = re.compile(
+        r"errors\s*:\s*\{\s*"
+        r"SCSIs\s*:\s*(\d+)\s*,\s*"
+        r"C2s\s*:\s*(\d+)\s*,\s*"
+        r"Q\s*:\s*(\d+)\s*\}",
+        re.IGNORECASE,
+    )
+    matches = [
+        (match.start(), match)
+        for pattern in (summary_pattern, progress_pattern)
+        for match in pattern.finditer(output)
+    ]
 
     if not matches:
         return None
 
-    match = matches[-1]
+    _position, match = max(matches, key=lambda item: item[0])
     return {
         "SCSI": int(match.group(1)),
         "C2": int(match.group(2)),

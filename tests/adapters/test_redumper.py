@@ -99,6 +99,68 @@ class RedumperCommandFactoryTests(unittest.TestCase):
         self.assertEqual(progress[0].values["label"], "Reading track 01")
         self.assertEqual(progress[-1].values["label"], "Refining track 01")
 
+    def test_client_retries_base_lba_split_failure_with_qtoc(self):
+        executor = mock.Mock()
+        executor.run.side_effect = (
+            CommandResult(
+                ("redumper", "split"),
+                255,
+                "error: unable to establish base LBA\n",
+            ),
+            CommandResult(
+                ("redumper", "split", "--force-qtoc"),
+                0,
+                "disc write offset: +0\n",
+            ),
+        )
+        plan = SimpleNamespace(split_command=["redumper", "split", "--force-split"])
+
+        result = RedumperClient(executor).split(plan)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(
+            executor.run.call_args_list,
+            [
+                mock.call(["redumper", "split", "--force-split"]),
+                mock.call(
+                    [
+                        "redumper",
+                        "split",
+                        "--force-split",
+                        "--force-qtoc",
+                    ]
+                ),
+            ],
+        )
+
+    def test_client_does_not_retry_other_or_already_qtoc_split_failures(self):
+        executor = mock.Mock()
+        executor.run.return_value = CommandResult(
+            ("redumper", "split"), 255, "error: unrelated\n"
+        )
+        client = RedumperClient(executor)
+        ordinary = SimpleNamespace(
+            split_command=["redumper", "split", "--force-split"]
+        )
+
+        self.assertEqual(client.split(ordinary).returncode, 255)
+        executor.run.assert_called_once()
+
+        executor.reset_mock()
+        executor.run.return_value = CommandResult(
+            ("redumper", "split"),
+            255,
+            "error: unable to establish base LBA\n",
+        )
+        qtoc = SimpleNamespace(
+            split_command=[
+                "redumper", "split", "--force-split", "--force-qtoc"
+            ]
+        )
+
+        self.assertEqual(client.split(qtoc).returncode, 255)
+        executor.run.assert_called_once()
+
     def test_progress_track_fallbacks_and_data_label(self):
         audio = Track(1, TrackKind.AUDIO, 0, 10, 20)
         data = Track(2, TrackKind.DATA, 4, 20, 30)

@@ -52,6 +52,8 @@ class RedumperCommandFactory:
 class RedumperClient:
     """Execute the domain operations represented by an extraction plan."""
 
+    _PARTIAL_DATA_TRACK_BASE_LBA_ERROR = "unable to establish base LBA"
+
     def __init__(self, executor):
         self._executor = executor
 
@@ -66,7 +68,19 @@ class RedumperClient:
         )
 
     def split(self, plan, **options):
-        return self._run(plan.split_command, **options)
+        result = self._run(plan.split_command, **options)
+        if (
+            result.returncode != 0
+            and self._PARTIAL_DATA_TRACK_BASE_LBA_ERROR in result.output
+            and "--force-qtoc" not in plan.split_command
+        ):
+            # Some redumper builds probe every data track from the stored full
+            # TOC during split.  For a partial image ending before a later data
+            # track, that probe seeks beyond the image and aborts before any
+            # selected audio can be split.  QTOC mode restricts splitting to
+            # the tracks actually represented by the partial subchannel dump.
+            return self._run([*plan.split_command, "--force-qtoc"], **options)
+        return result
 
     def _run(self, command, **options):
         result = self._executor.run(command, **options)

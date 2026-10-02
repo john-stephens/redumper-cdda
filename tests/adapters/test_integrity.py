@@ -30,6 +30,36 @@ class IntegrityCoverageTests(unittest.TestCase):
             [(0, 48)],
         )
 
+    def test_media_error_progress_status_after_refine(self):
+        output = (
+            "media errors:\n  SCSI: 0 samples\n  C2: 733 samples\n  Q: 1177\n"
+            "- [  3%] LBA: 181000/196042, "
+            "errors: { SCSIs: 0, C2s: 727, Q: 1177 }\n"
+            "- [ 85%] LBA: 193819/196042, "
+            "errors: { SCSIs: 0, C2s: 310, Q: 1175 }, retry: 100\n"
+            "correction statistics:\n"
+            "  SCSI: 0 samples\n  C2: 423 samples\n  Q: 2 sectors\n"
+        )
+        self.assertEqual(
+            self.module.parse_media_errors(output),
+            {"SCSI": 0, "C2": 310, "Q": 1175},
+        )
+
+        final_summary = output + (
+            "media errors:\n  SCSI: 0 samples\n  C2: 12 samples\n  Q: 9\n"
+        )
+        self.assertEqual(
+            self.module.parse_media_errors(final_summary),
+            {"SCSI": 0, "C2": 12, "Q": 9},
+        )
+
+    def test_correction_statistics_are_not_current_status(self):
+        output = (
+            "correction statistics:\n"
+            "  SCSI: 0 samples\n  C2: 423 samples\n  Q: 2 sectors\n"
+        )
+        self.assertIsNone(self.module.parse_media_errors(output))
+
     def test_state_file_success_counts_samples_and_sectors(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "disc.state"
