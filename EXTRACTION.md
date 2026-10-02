@@ -166,10 +166,27 @@ redumper refine \
   --lba-end=34311
 ```
 
+`--refine-passes=0` represents an unlimited pass count;
+`--refine-forever` is an alias for the same setting. Unlimited refinement does
+not change the stop condition: refinement stops as soon as SCSI and C2 are
+both zero. Q remains informational, is not explicitly refined, and does not
+independently start or continue refinement.
+
 If the script cannot reliably determine the SCSI/C2 state, it should
 fail closed rather than create apparently verified output. A
 structured/state-based redumper error query is preferable to fragile
 console parsing if one can be validated.
+
+Some redumper builds probe every data track in the stored full TOC while
+splitting, including an unselected later-session data track outside a partial
+image. Before splitting a range that ends before the disc lead-out, temporarily
+replace redumper's stored format-0 TOC with a bounded view containing only the
+tracks intersecting the acquired logical range and an `AA` lead-out at the
+logical endpoint. Temporarily hide the full-TOC sidecar so redumper cannot
+replace that bounded view with later sessions. Restore both metadata files
+immediately after splitting. This prevents unselected lead-out, inter-session,
+and later data-track ranges from entering split analysis; selected output must
+still pass the normal CUE and exact-sector validation.
 
 ## AccurateRip verification
 

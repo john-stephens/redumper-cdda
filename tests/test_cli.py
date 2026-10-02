@@ -6,6 +6,7 @@ import io
 import signal
 import runpy
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
@@ -27,15 +28,35 @@ class ArgumentParserFactoryTests(unittest.TestCase):
         self.assertEqual(parse("3-"), TrackSelection(3, None))
         with self.assertRaises(argparse.ArgumentTypeError):
             parse("bad")
+        with self.assertRaises(argparse.ArgumentTypeError):
+            cli.ArgumentParserFactory.refine_pass_count("bad")
 
     def test_parser_defaults_and_options(self):
         args = cli.ArgumentParserFactory().create().parse_args(
             ["/dev/sg4", "2", "-s", "--output", "x.wav", "-p", "album",
-             "--retries", "5", "--refine-passes", "2", "-X", "--no-accuraterip"]
+             "--retries", "5", "--refine-passes", "2", "--refine-forever",
+             "--log-file", "rip.log", "-X", "--no-accuraterip"]
         )
         self.assertEqual(args.track, TrackSelection(2, 2))
         self.assertEqual(args.output, Path("x.wav"))
         self.assertFalse(args.accuraterip)
+        self.assertIsNone(args.refine_passes)
+        self.assertEqual(args.log_file, Path("rip.log"))
+
+        unlimited = cli.ArgumentParserFactory().create().parse_args(
+            ["/dev/sg4", "--refine-passes=0"]
+        )
+        self.assertIsNone(unlimited.refine_passes)
+
+        help_text = cli.ArgumentParserFactory().create().format_help()
+        for option in (
+            "--output", "--retries", "--refine-passes", "--refine-forever",
+            "--log-file", "--abort-on-skip", "--single-file", "--prefix",
+            "--include-data", "--show-layout", "--no-accuraterip",
+            "--verbose", "--quiet",
+        ):
+            self.assertIn(option, help_text)
+        self.assertIn("0 means unlimited", help_text)
 
 
 class SystemDependencyCheckerTests(unittest.TestCase):
@@ -74,7 +95,41 @@ class CliApplicationTests(unittest.TestCase):
         request = application.run.call_args.args[0]
         self.assertEqual(request.selection, TrackSelection(2, 2))
         self.assertFalse(request.accuraterip)
+        self.assertEqual(request.refine_passes, cli.DEFAULT_REFINE_PASSES)
         checker.check.assert_called_once_with(False)
+
+    def test_log_file_receives_verbose_events_with_concise_console(self):
+        checker = mock.Mock()
+
+        class Application:
+            def __init__(self, reporter):
+                self.reporter = reporter
+
+            def run(self, request):
+                self.reporter.publish(
+                    cli.LifecycleEvent("command_started", ("redumper", "dump"))
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rip.log"
+            command = cli.CliApplication(
+                dependency_checker=checker,
+                application_factory=Application,
+                reporter_factory=lambda _verbose, _quiet: cli.reporter_for(
+                    output=mock.Mock()
+                ),
+            )
+
+            self.assertEqual(
+                command.execute(["drive", "1", "--log-file", str(path)]), 0
+            )
+
+            self.assertIn("+ redumper dump", path.read_text(encoding="utf-8"))
+
+    def test_log_file_open_failure_is_typed(self):
+        command, _checker, _application, _reporter = self.make_cli()
+        with self.assertRaisesRegex(cli.OutputError, "Could not open log file"):
+            command.execute(["drive", "--log-file", "/missing/dir/rip.log"])
 
     def test_show_layout_reports_without_extracting(self):
         command, checker, application, reporter = self.make_cli()
@@ -99,7 +154,7 @@ class CliApplicationTests(unittest.TestCase):
     def test_cli_only_validation(self):
         invalid = (
             (["drive", "--retries", "-1"], "retry"),
-            (["drive", "--refine-passes", "-1"], "refine"),
+            (["drive", "--refine-passes", "-1"], "2"),
             (["drive", "--prefix", "../x"], "prefix"),
             (["drive", "--output", "x.wav"], "single-file"),
             (["drive", "-d", "-s", "1-2"], "track range"),

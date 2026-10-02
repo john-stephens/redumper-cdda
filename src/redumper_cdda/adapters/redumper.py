@@ -52,8 +52,6 @@ class RedumperCommandFactory:
 class RedumperClient:
     """Execute the domain operations represented by an extraction plan."""
 
-    _PARTIAL_DATA_TRACK_BASE_LBA_ERROR = "unable to establish base LBA"
-
     def __init__(self, executor):
         self._executor = executor
 
@@ -68,19 +66,69 @@ class RedumperClient:
         )
 
     def split(self, plan, **options):
-        result = self._run(plan.split_command, **options)
+        toc_path = plan.workdir / f"{plan.image_name}.toc"
         if (
-            result.returncode != 0
-            and self._PARTIAL_DATA_TRACK_BASE_LBA_ERROR in result.output
-            and "--force-qtoc" not in plan.split_command
+            plan.logical_end_lba >= plan.disc.lead_out_lba
+            or not toc_path.is_file()
         ):
-            # Some redumper builds probe every data track from the stored full
-            # TOC during split.  For a partial image ending before a later data
-            # track, that probe seeks beyond the image and aborts before any
-            # selected audio can be split.  QTOC mode restricts splitting to
-            # the tracks actually represented by the partial subchannel dump.
-            return self._run([*plan.split_command, "--force-qtoc"], **options)
-        return result
+            return self._run(plan.split_command, **options)
+
+        fulltoc_path = plan.workdir / f"{plan.image_name}.fulltoc"
+        original_toc = toc_path.read_bytes()
+        original_fulltoc = (
+            fulltoc_path.read_bytes() if fulltoc_path.is_file() else None
+        )
+        bounded_toc = self._bounded_toc(plan, original_toc)
+        toc_path.write_bytes(bounded_toc)
+        if original_fulltoc is not None:
+            fulltoc_path.unlink()
+        try:
+            return self._run(plan.split_command, **options)
+        finally:
+            toc_path.write_bytes(original_toc)
+            if original_fulltoc is not None:
+                fulltoc_path.write_bytes(original_fulltoc)
+
+    @staticmethod
+    def _bounded_toc(plan, toc):
+        if len(toc) < 4:
+            return toc
+        response_length = int.from_bytes(toc[0:2], "big") + 2
+        if response_length > len(toc) or (response_length - 4) % 8:
+            return toc
+        descriptors = [
+            toc[offset:offset + 8]
+            for offset in range(4, response_length, 8)
+        ]
+        selected = {
+            track.number
+            for track in plan.disc.tracks
+            if (
+                track.begin_lba < plan.logical_end_lba
+                and track.end_lba > plan.logical_start_lba
+            )
+        }
+        if plan.selection.first_track.number == 0:
+            selected.add(1)
+        track_descriptors = [
+            descriptor
+            for descriptor in descriptors
+            if descriptor[2] in selected
+        ]
+        leadout = next(
+            (bytearray(item) for item in descriptors if item[2] == 0xAA),
+            None,
+        )
+        if not track_descriptors or leadout is None:
+            return toc
+        leadout[4:8] = plan.logical_end_lba.to_bytes(4, "big")
+        bounded_descriptors = b"".join([*track_descriptors, bytes(leadout)])
+        data_length = 2 + len(bounded_descriptors)
+        return (
+            data_length.to_bytes(2, "big")
+            + bytes((min(selected), max(selected)))
+            + bounded_descriptors
+        )
 
     def _run(self, command, **options):
         result = self._executor.run(command, **options)
@@ -90,12 +138,25 @@ class RedumperClient:
 class RedumperProcessExecutor:
     """Run redumper while translating its output into reporting events."""
 
+    _ERROR_COUNTS = re.compile(
+        r"errors:\s*\{\s*SCSIs?:\s*(\d+)\s*,\s*"
+        r"C2s?:\s*(\d+)\s*,\s*Q:\s*(\d+)\s*\}",
+        re.IGNORECASE,
+    )
+
     def __init__(self, runner, reporter):
         self._runner = runner
         self._reporter = reporter
+        self._track_errors = {}
+        self._total_errors = (0, 0, 0)
 
     def run(self, command, progress_tracks=()):
         operation = command[1]
+        if operation == "dump":
+            self._track_errors = {
+                track.number: [0, 0, 0] for track in progress_tracks
+            }
+            self._total_errors = (0, 0, 0)
         self._reporter.publish(LifecycleEvent("command_started", tuple(command)))
         last_progress = None
         current_track = None
@@ -108,33 +169,80 @@ class RedumperProcessExecutor:
             matches = re.findall(r"\[\s*(\d+)%\]", line)
             if not matches:
                 return
-            percent = int(matches[-1])
             lba_match = re.search(r"\bLBA\s*:\s*(-?\d+)", line, re.IGNORECASE)
             if lba_match:
-                current_track = self._track_for_lba(
+                next_track = self._track_for_lba(
                     progress_tracks, int(lba_match.group(1))
                 )
-            progress = (
-                percent, current_track.number if current_track else None
+                if current_track is not None and next_track is not current_track:
+                    self._publish_progress(operation, current_track, 100)
+                    self._reporter.publish(LifecycleEvent("progress_end"))
+                    last_progress = None
+                current_track = next_track
+            counts_match = self._ERROR_COUNTS.search(line)
+            if counts_match:
+                totals = tuple(int(value) for value in counts_match.groups())
+                if current_track is not None:
+                    track_errors = self._track_errors.setdefault(
+                        current_track.number, [0, 0, 0]
+                    )
+                    for index, (total, previous) in enumerate(
+                        zip(totals, self._total_errors)
+                    ):
+                        track_errors[index] = max(
+                            0, track_errors[index] + total - previous
+                        )
+                self._total_errors = totals
+            percent = (
+                self._track_percent(current_track, int(lba_match.group(1)))
+                if current_track is not None and lba_match
+                else int(matches[-1])
             )
+            errors = tuple(
+                self._track_errors.get(current_track.number, (0, 0, 0))
+                if current_track is not None
+                else self._total_errors
+            )
+            progress = (percent, current_track.number if current_track else None, errors)
             if progress == last_progress:
                 return
             last_progress = progress
-            label = "Reading" if operation == "dump" else "Refining"
-            if current_track is not None:
-                label += (
-                    f" data track {current_track.number:02d}"
-                    if current_track.kind.value == "data"
-                    else f" track {current_track.number:02d}"
-                )
-            self._reporter.publish(
-                LifecycleEvent("progress", {"label": label, "percent": percent})
-            )
+            self._publish_progress(operation, current_track, percent)
 
         result = self._runner.run_streaming(command, observer=observe)
         if last_progress is not None:
+            if current_track is not None and last_progress[0] != 100:
+                self._publish_progress(operation, current_track, 100)
             self._reporter.publish(LifecycleEvent("progress_end"))
         return result
+
+    def _publish_progress(self, operation, track, percent):
+        label = "Reading" if operation == "dump" else "Refining"
+        errors = self._total_errors
+        if track is not None:
+            label += (
+                f" data track {track.number:02d}"
+                if track.kind.value == "data"
+                else f" track {track.number:02d}"
+            )
+            errors = self._track_errors.get(track.number, (0, 0, 0))
+        self._reporter.publish(
+            LifecycleEvent(
+                "progress",
+                {
+                    "label": label,
+                    "percent": percent,
+                    "scsi": errors[0],
+                    "c2": errors[1],
+                    "q": errors[2],
+                },
+            )
+        )
+
+    @staticmethod
+    def _track_percent(track, lba):
+        completed = min(max(lba - track.begin_lba + 1, 0), track.length_sectors)
+        return completed * 100 // track.length_sectors
 
     @staticmethod
     def _track_for_lba(tracks, lba):

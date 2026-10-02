@@ -30,7 +30,9 @@ class AcquisitionService:
         )
 
         passes = 0
-        while errors.has_data_errors and passes < request.refine_passes:
+        while errors.has_data_errors and (
+            request.refine_passes is None or passes < request.refine_passes
+        ):
             passes += 1
             self._reporter.publish(
                 LifecycleEvent(

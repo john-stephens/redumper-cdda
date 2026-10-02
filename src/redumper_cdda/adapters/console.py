@@ -12,6 +12,18 @@ class QuietReporter:
         return None
 
 
+class MultiplexReporter:
+    """Publish each event to multiple observational reporters."""
+
+    def __init__(self, *reporters):
+        self._reporters = reporters
+        self.verbose = any(reporter.verbose for reporter in reporters)
+
+    def publish(self, event):
+        for reporter in self._reporters:
+            reporter.publish(event)
+
+
 class ConciseReporter:
     verbose = False
 
@@ -62,7 +74,8 @@ class ConciseReporter:
 
     def _progress(self, values):
         self._output(
-            f"\r{values['label']}: {values['percent']:3d}%",
+            f"\r{values['label']}: {values['percent']:3d}% "
+            f"SCSI={values['scsi']} C2={values['c2']} Q={values['q']}",
             end="",
             flush=True,
         )
@@ -161,6 +174,7 @@ class VerboseReporter:
             "layout_read": lambda label: self._output(label),
             "command_started": self._command,
             "tool_output": lambda line: self._output(line, end=""),
+            "conversion_output": self._conversion_output,
             "plan": self._plan,
             "acquisition_started": lambda _value: self._heading(
                 "Initial partial dump"
@@ -179,6 +193,9 @@ class VerboseReporter:
         handler = handlers.get(event.name)
         if handler is not None:
             handler(values)
+
+    def _conversion_output(self, values):
+        self._output(*values["args"], **values["options"])
 
     def _heading(self, title):
         self._output(f"\n{title}\n{'=' * len(title)}")
@@ -200,9 +217,13 @@ class VerboseReporter:
             )
 
     def _refinement(self, values):
-        self._heading(
-            f"Refine pass {values['pass_number']}/{values['maximum']}"
+        maximum = values["maximum"]
+        label = (
+            f"{values['pass_number']}/{maximum}"
+            if maximum is not None
+            else f"{values['pass_number']} (until clean)"
         )
+        self._heading(f"Refine pass {label}")
         sector_range = values["range"]
         self._output(
             f"Refining only LBA {sector_range.start_lba}.."

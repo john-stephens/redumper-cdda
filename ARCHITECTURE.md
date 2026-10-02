@@ -171,7 +171,9 @@ formats those events:
 -   `QuietReporter` suppresses routine output;
 -   `ConciseReporter` renders summaries, progress, warnings, and final counts;
 -   `VerboseReporter` renders commands, tool output, exact ranges, resolved
-    sources, integrity details, and verification details.
+    sources, integrity details, and verification details;
+-   `MultiplexReporter` sends the same events to the selected terminal
+    reporter and an optional verbose log-file reporter.
 
 Reporting is observational. A reporter must never change selection,
 refinement, integrity, output, or verification policy.

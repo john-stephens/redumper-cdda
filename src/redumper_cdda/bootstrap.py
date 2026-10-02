@@ -24,6 +24,7 @@ from .application.output import OutputPlanner, OutputTransaction
 from .application.planning import ExtractionPlanner
 from .application.splitting import SplitService
 from .application.workflow import ExtractionApplication
+from .domain.events import LifecycleEvent
 from .domain.outputs import OutputKind
 from .integrity import inspect_track_media_errors, parse_media_errors, parse_split_write_offsets
 from .iso9660 import data_track_to_iso
@@ -38,6 +39,7 @@ def create_application(reporter):
     redumper = RedumperClient(RedumperProcessExecutor(runner, reporter))
     integrity = RedumperIntegrityParser(parse_media_errors, parse_split_write_offsets)
     cue_parser = CueSheetParser()
+    conversion_output = _conversion_output(reporter)
     return ExtractionApplication(
         layout_provider=layout_provider,
         planner=ExtractionPlanner(OutputPlanner(), RedumperCommandFactory),
@@ -52,8 +54,10 @@ def create_application(reporter):
         ),
         output_service=OutputTransaction(
             {
-                OutputKind.AUDIO: WaveOutputWriter(),
-                OutputKind.DATA: IsoOutputWriter(data_track_to_iso),
+                OutputKind.AUDIO: WaveOutputWriter(conversion_output),
+                OutputKind.DATA: IsoOutputWriter(
+                    partial(data_track_to_iso, output=conversion_output)
+                ),
             },
             reporter,
         ),
@@ -61,6 +65,18 @@ def create_application(reporter):
         workspace_factory=TemporaryWorkspaceFactory(reporter),
         reporter=reporter,
     )
+
+
+def _conversion_output(reporter):
+    def output(*args, **options):
+        reporter.publish(
+            LifecycleEvent(
+                "conversion_output",
+                {"args": args, "options": options},
+            )
+        )
+
+    return output
 
 
 def _verifier(enabled):

@@ -23,6 +23,9 @@ mixed audio/data ranges when requested.
 -   Verifies selected audio tracks against the AccurateRip database by default.
 -   Refines errors and can omit only affected per-track outputs when strict
     abort-on-error behavior is requested.
+-   Can keep refining a difficult disc until all SCSI and C2 errors are gone.
+-   Can save complete diagnostic output to a log while keeping the terminal
+    display concise.
 
 ## Requirements
 
@@ -65,6 +68,24 @@ Typical optional controls:
 ``` bash
 redumper-cdda /dev/sg4 2 --retries=100 --refine-passes=3
 ```
+
+`--retries` controls how many retries redumper performs for a problem area
+within one dump or refinement pass. `--refine-passes` controls how many
+additional passes this program may start. These are separate controls.
+
+For a difficult disc, set the number of refinement passes to unlimited. Use
+`--refine-passes=0`, or its more readable alias `--refine-forever`, to keep
+starting bounded refinement passes until both SCSI and C2 reach zero:
+
+``` bash
+redumper-cdda /dev/sg4 2 --retries=100 --refine-passes=0
+# Equivalent: redumper-cdda /dev/sg4 2 --retries=100 --refine-forever
+```
+
+This can run indefinitely when damage cannot be recovered. Press Ctrl-C to
+stop; the temporary workspace will be cleaned up. Only a refine-pass count of
+zero means “forever.” A `--retries` value of zero instead tells redumper to
+perform no retries within each pass.
 
 Track selections may be a single track or a contiguous range:
 
@@ -125,8 +146,9 @@ redumper-cdda /dev/sg4 1-3 --prefix album
 # Writes album01.wav, album02.wav, and album03.wav
 ```
 
-Normal output is concise, with a track summary and single-line progress
-showing the current track and percentage during dumping and refinement.
+Normal output is concise, with a track summary and one completed progress line
+per track during dumping and refinement. Each line shows the track-relative
+percentage and that track's current SCSI, C2, and Q counts.
 Use `-v` or `--verbose` to show executed
 commands, complete redumper output, exact ranges, split segments, and
 the full integrity summary:
@@ -134,6 +156,18 @@ the full integrity summary:
 ``` bash
 redumper-cdda /dev/sg4 2 --verbose
 ```
+
+Use `--log-file=PATH` to write the same complete verbose diagnostics to a
+file while retaining the normal concise terminal display:
+
+``` bash
+redumper-cdda /dev/sg4 2 --log-file=rip.log
+```
+
+The log file is replaced at the start of each run. It is useful when asking
+for help because it records the exact commands, redumper messages, refinement
+passes, ranges, and final integrity information. It does not contain the
+ripped audio or data payload.
 
 Use `-q` or `--quiet` to suppress routine output. Errors are still
 written to standard error and the exit status still indicates success
@@ -148,6 +182,32 @@ written. In the default separate-file mode, clean tracks are retained and only
 affected track files are omitted; the command exits nonzero to report the
 omissions. With `--single-file`, any unresolved SCSI/C2 error rejects the one
 combined output, so no output file is created.
+
+## Understanding SCSI, C2, and Q counts
+
+CD drives report several different kinds of read problems. The three counters
+shown during a rip do not all mean the same thing:
+
+-   **SCSI** means the drive could not successfully complete a low-level read
+    request. This can be caused by severe damage, an unreadable area, a drive
+    or connection problem, or the drive refusing the requested read. Any
+    remaining SCSI count means some requested audio or data was not recovered
+    normally.
+-   **C2** means the drive read the sector but reported bytes or samples that
+    its internal CD error correction could not fully trust. Scratches, dirt,
+    deterioration, and marginal drive/media combinations commonly cause C2
+    errors. Refinement rereads these locations and may reduce the count.
+-   **Q** refers to the Q portion of the CD subchannel. It carries navigation
+    information such as track, index, and timing data rather than the main
+    audio samples. Q errors are informational: this program does not explicitly
+    refine them, and they do not by themselves make the audio payload fail or
+    keep unlimited refinement running.
+
+The preferred final result is `SCSI=0, C2=0`. A nonzero Q count may still be
+reported separately. By default, output is written with a clear warning if
+SCSI or C2 remain after the configured passes. Use `--abort-on-skip` when you
+would rather omit affected output, or `--refine-forever` when you want to keep
+trying until the SCSI and C2 counts both reach zero.
 
 By default, the script calculates ARv1 and ARv2 checksums with ARver and
 compares selected audio tracks with the AccurateRip database automatically:

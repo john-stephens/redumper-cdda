@@ -1,9 +1,11 @@
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from redumper_cdda.adapters.console import (
-    ConciseReporter, QuietReporter, VerboseReporter, reporter_for,
+    ConciseReporter, MultiplexReporter, QuietReporter, VerboseReporter,
+    reporter_for,
 )
 from redumper_cdda.domain.disc import DiscLayout, Track, TrackKind
 from redumper_cdda.domain.events import LifecycleEvent
@@ -37,13 +39,27 @@ class ConsoleReporterTests(unittest.TestCase):
         self.assertIsInstance(reporter_for(verbose=True), VerboseReporter)
         self.assertIsInstance(reporter_for(), ConciseReporter)
 
+        first = mock.Mock(verbose=False)
+        second = mock.Mock(verbose=True)
+        multiplex = MultiplexReporter(first, second)
+        event = LifecycleEvent("anything")
+        multiplex.publish(event)
+        self.assertTrue(multiplex.verbose)
+        first.publish.assert_called_once_with(event)
+        second.publish.assert_called_once_with(event)
+
     def test_concise_all_events(self):
         reporter = ConciseReporter(self.output)
         request = SimpleNamespace(single_file=False)
         reporter.publish(LifecycleEvent("plan", {"plan": self.plan, "request": request}))
         request.single_file = True
         reporter.publish(LifecycleEvent("plan", {"plan": self.plan, "request": request}))
-        reporter.publish(LifecycleEvent("progress", {"label": "Reading", "percent": 50}))
+        reporter.publish(
+            LifecycleEvent(
+                "progress",
+                {"label": "Reading", "percent": 50, "scsi": 1, "c2": 2, "q": 3},
+            )
+        )
         reporter.publish(LifecycleEvent("progress_end"))
         reporter.publish(LifecycleEvent("warning", "dirty"))
         reporter.publish(LifecycleEvent("split_started"))
@@ -84,6 +100,7 @@ class ConsoleReporterTests(unittest.TestCase):
         reporter.publish(LifecycleEvent("unknown"))
         rendered = "\n".join(line for line, _options in self.lines)
         self.assertIn("Ripping track 01", rendered)
+        self.assertIn("Reading:  50% SCSI=1 C2=2 Q=3", rendered)
         self.assertIn("Skipping Track 01", rendered)
         self.assertIn("data", rendered)
 
@@ -129,6 +146,7 @@ class ConsoleReporterTests(unittest.TestCase):
             LifecycleEvent("plan", {"plan": self.plan}),
             LifecycleEvent("acquisition_started"),
             LifecycleEvent("refinement_started", {"pass_number": 1, "maximum": 2, "range": SimpleNamespace(start_lba=10, end_lba=21)}),
+            LifecycleEvent("refinement_started", {"pass_number": 2, "maximum": None, "range": SimpleNamespace(start_lba=10, end_lba=21)}),
             LifecycleEvent("media_errors", {"errors": MediaErrors(1, 2, 3)}),
             LifecycleEvent("split_started"),
             LifecycleEvent("omitted", SimpleNamespace(plan=SimpleNamespace(track=self.track), media_errors=TrackMediaErrors(1, 1, 1, 1))),
@@ -144,6 +162,7 @@ class ConsoleReporterTests(unittest.TestCase):
             reporter.publish(event)
         rendered = "\n".join(line for line, _options in self.lines)
         self.assertIn("Physical read range", rendered)
+        self.assertIn("Refine pass 2 (until clean)", rendered)
         self.assertIn("WARNING", rendered)
 
 

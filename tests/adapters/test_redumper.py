@@ -1,4 +1,5 @@
 import unittest
+from tempfile import TemporaryDirectory
 from pathlib import Path
 
 from redumper_cdda.adapters.redumper import (
@@ -8,7 +9,7 @@ from redumper_cdda.adapters.redumper import (
     RedumperProcessExecutor,
     RedumperStateInspector,
 )
-from redumper_cdda.domain.disc import Track, TrackKind
+from redumper_cdda.domain.disc import DiscLayout, Track, TrackKind
 from redumper_cdda.domain.errors import IntegrityStatusError
 from redumper_cdda.domain.extraction import SectorRange
 from redumper_cdda.domain.integrity import WriteOffsetMap
@@ -76,9 +77,9 @@ class RedumperCommandFactoryTests(unittest.TestCase):
 
         def streaming(command, observer):
             observer("detail\n")
-            observer("[ 10%] LBA: 1\n")
+            observer("[ 10%] LBA: 1, errors: { SCSIs: 0, C2s: 2, Q: 1 }\n")
             observer("[ 10%] duplicate\n")
-            observer("[100%] done\n")
+            observer("[100%] LBA: 49, errors: { SCSIs: 0, C2s: 2, Q: 1 }\n")
             return CommandResult(tuple(command), 0, "captured")
 
         runner.run_streaming.side_effect = streaming
@@ -88,6 +89,10 @@ class RedumperCommandFactoryTests(unittest.TestCase):
             dump_command=["redumper", "dump"],
             refine_command=["redumper", "refine"],
             split_command=["redumper", "split"],
+            workdir=Path("/missing"),
+            image_name="partial",
+            disc=DiscLayout((Track(1, TrackKind.AUDIO, 0, 0, 50),), 50),
+            logical_end_lba=50,
             selection=SimpleNamespace(
                 tracks=(Track(1, TrackKind.AUDIO, 0, 0, 50),)
             ),
@@ -98,68 +103,112 @@ class RedumperCommandFactoryTests(unittest.TestCase):
         progress = [event for event in reporter.events if event.name == "progress"]
         self.assertEqual(progress[0].values["label"], "Reading track 01")
         self.assertEqual(progress[-1].values["label"], "Refining track 01")
+        self.assertEqual(progress[0].values["percent"], 4)
+        self.assertEqual(progress[0].values["c2"], 2)
 
-    def test_client_retries_base_lba_split_failure_with_qtoc(self):
+    def test_client_splits_partial_range_with_bounded_toc_and_restores_metadata(self):
+        with TemporaryDirectory() as directory:
+            workdir = Path(directory)
+            toc_path = workdir / "partial.toc"
+            fulltoc_path = workdir / "partial.fulltoc"
+            original_toc = self._toc(
+                ((1, 0, 0), (2, 0, 100), (3, 4, 200)), 300
+            )
+            toc_path.write_bytes(original_toc)
+            fulltoc_path.write_bytes(b"full toc")
+            executor = mock.Mock()
+
+            def execute(command):
+                bounded = toc_path.read_bytes()
+                self.assertFalse(fulltoc_path.exists())
+                self.assertEqual((bounded[2], bounded[3]), (1, 2))
+                descriptors = [
+                    bounded[offset:offset + 8]
+                    for offset in range(4, len(bounded), 8)
+                ]
+                self.assertEqual([item[2] for item in descriptors], [1, 2, 0xAA])
+                self.assertEqual(int.from_bytes(descriptors[-1][4:8], "big"), 200)
+                return CommandResult(tuple(command), 0, "split")
+
+            executor.run.side_effect = execute
+            tracks = (
+                Track(1, TrackKind.AUDIO, 0, 0, 100),
+                Track(2, TrackKind.AUDIO, 0, 100, 200),
+                Track(3, TrackKind.DATA, 4, 200, 300),
+            )
+            plan = SimpleNamespace(
+                split_command=["redumper", "split", "--force-split"],
+                workdir=workdir,
+                image_name="partial",
+                disc=DiscLayout(tracks, 300),
+                selection=SimpleNamespace(first_track=tracks[0]),
+                logical_start_lba=0,
+                logical_end_lba=200,
+            )
+
+            result = RedumperClient(executor).split(plan)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(toc_path.read_bytes(), original_toc)
+            self.assertEqual(fulltoc_path.read_bytes(), b"full toc")
+
+            fulltoc_path.unlink()
+            result = RedumperClient(executor).split(plan)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(toc_path.read_bytes(), original_toc)
+            self.assertFalse(fulltoc_path.exists())
+        self.assertEqual(executor.run.call_count, 2)
+        executor.run.assert_called_with(["redumper", "split", "--force-split"])
+
+    def test_client_uses_original_toc_for_complete_or_missing_metadata(self):
         executor = mock.Mock()
-        executor.run.side_effect = (
-            CommandResult(
-                ("redumper", "split"),
-                255,
-                "error: unable to establish base LBA\n",
-            ),
-            CommandResult(
-                ("redumper", "split", "--force-qtoc"),
-                0,
-                "disc write offset: +0\n",
-            ),
-        )
-        plan = SimpleNamespace(split_command=["redumper", "split", "--force-split"])
-
-        result = RedumperClient(executor).split(plan)
-
-        self.assertEqual(result.returncode, 0)
-        self.assertEqual(
-            executor.run.call_args_list,
-            [
-                mock.call(["redumper", "split", "--force-split"]),
-                mock.call(
-                    [
-                        "redumper",
-                        "split",
-                        "--force-split",
-                        "--force-qtoc",
-                    ]
-                ),
-            ],
-        )
-
-    def test_client_does_not_retry_other_or_already_qtoc_split_failures(self):
-        executor = mock.Mock()
-        executor.run.return_value = CommandResult(
-            ("redumper", "split"), 255, "error: unrelated\n"
+        executor.run.return_value = CommandResult((), 0, "split")
+        track = Track(1, TrackKind.AUDIO, 0, 0, 100)
+        plan = SimpleNamespace(
+            split_command=["redumper", "split"],
+            workdir=Path("/missing"),
+            image_name="partial",
+            disc=DiscLayout((track,), 100),
+            logical_end_lba=100,
         )
         client = RedumperClient(executor)
-        ordinary = SimpleNamespace(
-            split_command=["redumper", "split", "--force-split"]
-        )
+        client.split(plan)
+        plan.logical_end_lba = 50
+        client.split(plan)
+        self.assertEqual(executor.run.call_count, 2)
 
-        self.assertEqual(client.split(ordinary).returncode, 255)
-        executor.run.assert_called_once()
-
-        executor.reset_mock()
-        executor.run.return_value = CommandResult(
-            ("redumper", "split"),
-            255,
-            "error: unable to establish base LBA\n",
+    def test_bounded_toc_track_zero_and_invalid_metadata_fallbacks(self):
+        track = Track(1, TrackKind.AUDIO, 0, 100, 200)
+        plan = SimpleNamespace(
+            disc=DiscLayout((track,), 200),
+            selection=SimpleNamespace(first_track=SimpleNamespace(number=0)),
+            logical_start_lba=0,
+            logical_end_lba=100,
         )
-        qtoc = SimpleNamespace(
-            split_command=[
-                "redumper", "split", "--force-split", "--force-qtoc"
-            ]
+        bounded = RedumperClient._bounded_toc(
+            plan, self._toc(((1, 0, 100),), 200)
         )
+        self.assertEqual((bounded[2], bounded[3]), (1, 1))
+        self.assertEqual(int.from_bytes(bounded[-4:], "big"), 100)
+        for invalid in (b"bad", b"\x00\x20\x01\x01", b"\x00\x0b\x01\x01" + b"x" * 9):
+            self.assertEqual(RedumperClient._bounded_toc(plan, invalid), invalid)
+        no_leadout = self._toc(((1, 0, 100),), 200)[:-8]
+        no_leadout = (len(no_leadout) - 2).to_bytes(2, "big") + no_leadout[2:]
+        self.assertEqual(RedumperClient._bounded_toc(plan, no_leadout), no_leadout)
 
-        self.assertEqual(client.split(qtoc).returncode, 255)
-        executor.run.assert_called_once()
+    @staticmethod
+    def _toc(tracks, leadout):
+        descriptors = []
+        for number, control, lba in tracks:
+            descriptors.append(
+                bytes((0, 0x10 | control, number, 0)) + lba.to_bytes(4, "big")
+            )
+        descriptors.append(bytes((0, 0x10, 0xAA, 0)) + leadout.to_bytes(4, "big"))
+        payload = b"".join(descriptors)
+        return (
+            (2 + len(payload)).to_bytes(2, "big")
+            + bytes((tracks[0][0], tracks[-1][0]))
+            + payload
+        )
 
     def test_progress_track_fallbacks_and_data_label(self):
         audio = Track(1, TrackKind.AUDIO, 0, 10, 20)
@@ -175,7 +224,7 @@ class RedumperCommandFactoryTests(unittest.TestCase):
         runner = mock.Mock()
 
         def streaming(command, observer):
-            observer("[ 50%] LBA: 25\n")
+            observer("[ 50%] LBA: 25, errors: { SCSI: 1, C2: 2, Q: 3 }\n")
             return CommandResult(tuple(command), 0, "")
 
         runner.run_streaming.side_effect = streaming
@@ -184,6 +233,45 @@ class RedumperCommandFactoryTests(unittest.TestCase):
         )
         progress = next(event for event in reporter.events if event.name == "progress")
         self.assertEqual(progress.values["label"], "Reading data track 02")
+        self.assertEqual(progress.values["percent"], 60)
+        self.assertEqual(progress.values["scsi"], 1)
+
+    def test_process_executor_ends_each_track_and_updates_refine_errors(self):
+        reporter = RecordingReporter()
+        runner = mock.Mock()
+        audio = Track(1, TrackKind.AUDIO, 0, 10, 20)
+        data = Track(2, TrackKind.DATA, 4, 20, 30)
+
+        def dump(command, observer):
+            observer("[ 25%] LBA: 14, errors: { SCSIs: 1, C2s: 4, Q: 2 }\n")
+            observer("[ 75%] LBA: 24, errors: { SCSIs: 3, C2s: 7, Q: 3 }\n")
+            return CommandResult(tuple(command), 0, "")
+
+        def refine(command, observer):
+            observer("[ 25%] LBA: 14, errors: { SCSIs: 2, C2s: 5, Q: 3 }\n")
+            observer("[ 75%] LBA: 24, errors: { SCSIs: 1, C2s: 2, Q: 2 }\n")
+            return CommandResult(tuple(command), 0, "")
+
+        runner.run_streaming.side_effect = (
+            lambda command, observer: (
+                dump(command, observer)
+                if command[1] == "dump"
+                else refine(command, observer)
+            )
+        )
+        executor = RedumperProcessExecutor(runner, reporter)
+        executor.run(["redumper", "dump"], progress_tracks=(audio, data))
+        executor.run(["redumper", "refine"], progress_tracks=(audio, data))
+
+        progress = [event.values for event in reporter.events if event.name == "progress"]
+        ends = [event for event in reporter.events if event.name == "progress_end"]
+        self.assertEqual(len(ends), 4)
+        self.assertEqual(progress[1]["percent"], 100)
+        self.assertEqual(progress[2]["label"], "Reading data track 02")
+        self.assertEqual(progress[4]["scsi"], 0)
+        self.assertEqual(progress[4]["c2"], 2)
+        self.assertEqual(progress[6]["scsi"], 1)
+        self.assertEqual(progress[6]["c2"], 0)
 
     def test_process_executor_without_progress(self):
         reporter = RecordingReporter()
@@ -200,10 +288,13 @@ class RedumperCommandFactoryTests(unittest.TestCase):
         reporter.events.clear()
 
         def percentage(command, observer):
-            observer("[ 25%] no lba\n")
+            line = "[ 25%] errors: { SCSIs: 1, C2s: 2, Q: 3 }\n"
+            observer(line)
+            observer(line)
             return CommandResult(tuple(command), 0, "text")
 
         runner.run_streaming.side_effect = percentage
         RedumperProcessExecutor(runner, reporter).run(["redumper", "dump"])
         progress = next(event for event in reporter.events if event.name == "progress")
         self.assertEqual(progress.values["label"], "Reading")
+        self.assertEqual(progress.values["c2"], 2)

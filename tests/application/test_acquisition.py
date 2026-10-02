@@ -25,7 +25,8 @@ class AcquisitionServiceTests(unittest.TestCase):
             physical_range=SectorRange(100, 201)
         )
         request = SimpleNamespace(
-            refine_passes=3, abort_on_skip=False, single_file=False
+            refine_passes=3,
+            abort_on_skip=False, single_file=False
         )
         redumper = mock.Mock()
         redumper.dump.return_value = CommandResult((), 0, "dirty")
@@ -47,7 +48,10 @@ class AcquisitionServiceTests(unittest.TestCase):
 
     def test_dump_and_refine_failures(self):
         plan = SimpleNamespace(physical_range=SectorRange(0, 2))
-        request = SimpleNamespace(refine_passes=1, abort_on_skip=False, single_file=False)
+        request = SimpleNamespace(
+            refine_passes=1,
+            abort_on_skip=False, single_file=False
+        )
         service, _redumper, _reporter = self.service(
             CommandResult((), 2, ""), []
         )
@@ -63,7 +67,10 @@ class AcquisitionServiceTests(unittest.TestCase):
 
     def test_unparseable_status_before_and_after_refine(self):
         plan = SimpleNamespace(physical_range=SectorRange(0, 2))
-        request = SimpleNamespace(refine_passes=1, abort_on_skip=False, single_file=False)
+        request = SimpleNamespace(
+            refine_passes=1,
+            abort_on_skip=False, single_file=False
+        )
         failure = IntegrityStatusError("missing")
         service, _redumper, _reporter = self.service(
             CommandResult((), 0, "bad"), [failure]
@@ -80,9 +87,11 @@ class AcquisitionServiceTests(unittest.TestCase):
     def test_unresolved_error_policies_and_pluralization(self):
         plan = SimpleNamespace(physical_range=SectorRange(0, 2))
         dirty = MediaErrors(1, 2, 0)
-        for passes, suffix in ((1, "pass."), (0, "passes.")):
+        for passes, suffix in ((1, "pass."), (2, "passes.")):
             request = SimpleNamespace(
-                refine_passes=passes, abort_on_skip=True, single_file=True
+                refine_passes=passes,
+                abort_on_skip=True,
+                single_file=True,
             )
             errors = [dirty] * (passes + 1)
             service, _redumper, _reporter = self.service(
@@ -93,13 +102,39 @@ class AcquisitionServiceTests(unittest.TestCase):
             ):
                 service.acquire(plan, request)
 
-        request = SimpleNamespace(refine_passes=0, abort_on_skip=False, single_file=False)
+        request = SimpleNamespace(
+            refine_passes=1,
+            abort_on_skip=False, single_file=False
+        )
         service, _redumper, reporter = self.service(
-            CommandResult((), 0, "dirty"), [dirty]
+            CommandResult((), 0, "dirty"), [dirty, dirty]
         )
         result = service.acquire(plan, request)
         self.assertTrue(result.media_errors.has_data_errors)
         self.assertEqual(reporter.events[-1].name, "warning")
+
+    def test_refine_forever_ignores_pass_limit_and_stops_when_clean(self):
+        plan = SimpleNamespace(physical_range=SectorRange(0, 2))
+        request = SimpleNamespace(
+            refine_passes=None,
+            abort_on_skip=False,
+            single_file=False,
+        )
+        dirty = MediaErrors(0, 1, 2)
+        service, redumper, reporter = self.service(
+            CommandResult((), 0, "dirty"),
+            [dirty, dirty, MediaErrors(0, 0, 1)],
+        )
+
+        result = service.acquire(plan, request)
+
+        self.assertEqual(result.refine_passes_used, 2)
+        self.assertEqual(redumper.refine.call_count, 2)
+        refinements = [
+            event for event in reporter.events
+            if event.name == "refinement_started"
+        ]
+        self.assertEqual(refinements[0].values["maximum"], None)
 
 
 if __name__ == "__main__":

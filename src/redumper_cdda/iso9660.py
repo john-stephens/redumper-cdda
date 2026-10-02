@@ -117,7 +117,7 @@ def read_iso9660_volume_size(iso_path, total_sectors):
     return volume_sectors_le
 
 
-def data_track_to_iso(data_track, iso_path, verbose=False):
+def data_track_to_iso(data_track, iso_path, verbose=False, output=print):
     iso_path.parent.mkdir(parents=True, exist_ok=True)
     track_type = data_track["track_type"]
     raw_sector_size = data_track["sector_size"]
@@ -147,15 +147,15 @@ def data_track_to_iso(data_track, iso_path, verbose=False):
         destination.truncate(volume_sectors * ISO_SECTOR_SIZE)
 
     if verbose:
-        print()
-        print("ISO conversion")
-        print("--------------")
-        print(f"Track:               {data_track['track']:02d}")
-        print(f"Mode:                {track_type}")
-        print(f"BIN:                 {data_track['path']}")
-        print(
+        output()
+        output("ISO conversion")
+        output("--------------")
+        output(f"Track:               {data_track['track']:02d}")
+        output(f"Mode:                {track_type}")
+        output(f"BIN:                 {data_track['path']}")
+        output(
             f"INDEX 01 offset:     "
             f"{data_track['start_sector']:,} sectors"
         )
-        print(f"ISO9660 sectors:     {volume_sectors:,}")
-        print(f"Temporary ISO:       {iso_path}")
+        output(f"ISO9660 sectors:     {volume_sectors:,}")
+        output(f"Temporary ISO:       {iso_path}")
