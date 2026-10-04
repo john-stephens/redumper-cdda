@@ -114,6 +114,14 @@ class ValidatePhysicalTestDataTests(unittest.TestCase):
             with self.assertRaisesRegex(validate.ValidationError, "not found"):
                 validate.load_manifests(root, ["absent"])
 
+            project_python = root / "project-python"
+            project_python.touch()
+            with mock.patch.object(validate, "PROJECT_PYTHON", project_python):
+                self.assertEqual(
+                    validate.launcher_command(validate.DEFAULT_LAUNCHER),
+                    [str(project_python), str(validate.DEFAULT_LAUNCHER)],
+                )
+
     def test_track_models_and_expected_output_names_are_manifest_driven(self):
         manifest = synthetic_manifest()
         track_zero = validate.selected_track(manifest, 0)

@@ -28,6 +28,7 @@ from redumper_cdda.integrity import (  # noqa: E402
 
 DEFAULT_TEST_DATA = REPOSITORY / "test_data"
 DEFAULT_LAUNCHER = REPOSITORY / "redumper-cdda"
+PROJECT_PYTHON = REPOSITORY / ".venv" / "bin" / "python"
 PCM_BYTES_PER_SECTOR = 2352
 PCM_FRAMES_PER_SECTOR = 588
 
@@ -235,7 +236,7 @@ def extraction_command(
     toc = safe_child(
         profile_dir, scenario["cdparanoia_toc_file"], "cdparanoia TOC"
     )
-    command = [str(launcher)]
+    command = launcher_command(launcher)
     if show_layout:
         command.append("--show-layout")
     else:
@@ -257,6 +258,14 @@ def extraction_command(
     if not show_layout:
         command.append(f"--log-file={output_dir / 'validation.log'}")
     return command
+
+
+def launcher_command(launcher):
+    launcher = launcher.resolve()
+    if launcher == DEFAULT_LAUNCHER.resolve():
+        python = PROJECT_PYTHON if PROJECT_PYTHON.is_file() else Path(sys.executable)
+        return [str(python), str(launcher)]
+    return [str(launcher)]
 
 
 def run_command(command, cwd, expect_success):

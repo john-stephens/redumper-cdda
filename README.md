@@ -233,7 +233,9 @@ run. To inspect them, provide a new path with `--keep-work=PATH`. Restrict a
 run by repeating `--profile=NAME`; use `--skip-source-hashes` only for a faster
 diagnostic run. No optical device, `sg_raw`, or cdparanoia is used. Redumper
 remains required for offline splitting, ARver must be installed, and the
-AccurateRip checks require network access.
+AccurateRip checks require network access. When the default repository launcher
+is used, the validator runs it with `.venv/bin/python` if that interpreter
+exists; otherwise it uses the validator's current Python interpreter.
 
 `--retries` controls how many retries redumper performs for a problem area
 within one dump or refinement pass. `--refine-passes` controls how many
