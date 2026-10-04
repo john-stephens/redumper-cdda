@@ -220,7 +220,10 @@ and extracts every scenario through `--existing-dump` and
 scenario split exactly once, WAV sector counts and formats are exact, ISO9660
 outputs are exactly trimmed, single-file packaging matches separate output,
 mixed single-file requests fail, clean tracks match across applicable captured
-ranges, and captured SCSI/C2 fixtures obey both default and strict policies.
+ranges after accounting for redumper's reported disc write offset, and captured
+SCSI/C2 fixtures obey both default and strict policies. Audio parity still
+requires every shared PCM frame to match exactly; data parity requires an
+exact whole-file hash match.
 
 Generated WAVs and ISOs use a temporary directory and are removed after the
 run. To inspect them, provide a new path with `--keep-work=PATH`. Restrict a

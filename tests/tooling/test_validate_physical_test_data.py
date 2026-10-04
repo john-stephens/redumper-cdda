@@ -148,6 +148,58 @@ class ValidatePhysicalTestDataTests(unittest.TestCase):
             with self.assertRaisesRegex(validate.ValidationError, "disagree"):
                 validate.iso_hash(iso_path)
 
+    def test_audio_parity_accounts_for_reported_write_offsets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            canonical = [
+                index.to_bytes(4, "little")
+                for index in range(validate.PCM_FRAMES_PER_SECTOR + 2)
+            ]
+
+            def write(name, frames):
+                path = root / name
+                with wave.open(str(path), "wb") as output:
+                    output.setnchannels(2)
+                    output.setsampwidth(2)
+                    output.setframerate(44100)
+                    output.writeframes(b"".join(frames))
+                return path
+
+            first = write("first.wav", canonical[:-2])
+            shifted = write("shifted.wav", canonical[2:])
+            outputs = [
+                validate.ParityOutput(first, "audio", 1, "unused", 0),
+                validate.ParityOutput(shifted, "audio", 1, "unused", 2),
+            ]
+            validate.validate_track_parity("synthetic", 7, outputs)
+
+            log = root / "validation.log"
+            log.write_text("disc write offset: +2\n", encoding="utf-8")
+            parsed = validate.parity_outputs(
+                synthetic_manifest(),
+                [(shifted, "audio", 2, 1)],
+                {1: "digest"},
+                log,
+            )
+            self.assertEqual(parsed[1].write_offset, 2)
+
+            shifted.write_bytes(first.read_bytes())
+            with self.assertRaisesRegex(validate.ValidationError, "differs"):
+                validate.validate_track_parity("synthetic", 7, outputs)
+
+    def test_data_parity_remains_an_exact_hash_comparison(self):
+        matching = [
+            validate.ParityOutput(Path("a"), "data", 1, "same"),
+            validate.ParityOutput(Path("b"), "data", 1, "same"),
+        ]
+        validate.validate_track_parity("synthetic", 1, matching)
+        with self.assertRaisesRegex(validate.ValidationError, "differs"):
+            validate.validate_track_parity(
+                "synthetic",
+                1,
+                [matching[0], validate.ParityOutput(Path("b"), "data", 1, "other")],
+            )
+
     def test_command_status_and_offline_log_checks(self):
         success = SimpleNamespace(returncode=0, stdout="ok")
         with mock.patch.object(validate.subprocess, "run", return_value=success):

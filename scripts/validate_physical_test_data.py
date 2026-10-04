@@ -11,10 +11,21 @@ import sys
 import tempfile
 import wave
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 
 REPOSITORY = Path(__file__).resolve().parents[1]
+SOURCE = REPOSITORY / "src"
+if str(SOURCE) not in sys.path:
+    sys.path.insert(0, str(SOURCE))
+
+from redumper_cdda.integrity import (  # noqa: E402
+    parse_split_write_offsets,
+    state_offset_for_lba,
+)
+
+
 DEFAULT_TEST_DATA = REPOSITORY / "test_data"
 DEFAULT_LAUNCHER = REPOSITORY / "redumper-cdda"
 PCM_BYTES_PER_SECTOR = 2352
@@ -23,6 +34,15 @@ PCM_FRAMES_PER_SECTOR = 588
 
 class ValidationError(RuntimeError):
     """Captured data or an offline extraction failed validation."""
+
+
+@dataclass(frozen=True)
+class ParityOutput:
+    path: Path
+    kind: str
+    sectors: int
+    digest: str
+    write_offset: int = 0
 
 
 def parser():
@@ -376,6 +396,89 @@ def combined_pcm_hash(paths):
     return digest.hexdigest()
 
 
+def pcm_window_hash(path, start_frame, frames):
+    digest = hashlib.sha256()
+    try:
+        with wave.open(str(path), "rb") as stream:
+            stream.setpos(start_frame)
+            remaining = frames
+            while remaining:
+                data = stream.readframes(min(remaining, PCM_FRAMES_PER_SECTOR * 1024))
+                if not data:
+                    break
+                digest.update(data)
+                remaining -= len(data) // 4
+    except (OSError, EOFError, wave.Error) as exc:
+        raise ValidationError(f"could not compare WAV {path}: {exc}") from exc
+    if remaining:
+        raise ValidationError(f"short PCM comparison window in {path}")
+    return digest.hexdigest()
+
+
+def parity_outputs(manifest, expected, hashes, log_path):
+    try:
+        log = log_path.read_text(encoding="utf-8", errors="replace")
+        offsets = parse_split_write_offsets(log)
+    except (OSError, RuntimeError) as exc:
+        raise ValidationError(
+            f"could not determine split offsets from {log_path}: {exc}"
+        ) from exc
+
+    outputs = {}
+    for path, kind, sectors, number in expected:
+        track = selected_track(manifest, number)
+        write_offset = 0
+        if kind == "audio":
+            begin_lba = track["begin_lba"]
+            end_lba = begin_lba + track["length_sectors"]
+            write_offset = state_offset_for_lba(offsets, begin_lba)
+            for boundary_lba, _candidate in offsets[1:]:
+                if begin_lba < boundary_lba < end_lba:
+                    raise ValidationError(
+                        "cannot compare an audio track whose redumper write "
+                        f"offset changes internally: Track {number:02d}"
+                    )
+        outputs[number] = ParityOutput(
+            path=path,
+            kind=kind,
+            sectors=sectors,
+            digest=hashes[number],
+            write_offset=write_offset,
+        )
+    return outputs
+
+
+def validate_track_parity(profile, number, outputs):
+    kinds = {item.kind for item in outputs}
+    sector_counts = {item.sectors for item in outputs}
+    if len(kinds) != 1 or len(sector_counts) != 1:
+        raise ValidationError(
+            f"Track {number:02d} has inconsistent metadata across {profile} scenarios"
+        )
+    if kinds == {"data"}:
+        matches = len({item.digest for item in outputs}) == 1
+    else:
+        frames = outputs[0].sectors * PCM_FRAMES_PER_SECTOR
+        common_start = max(item.write_offset for item in outputs)
+        common_end = min(item.write_offset + frames for item in outputs)
+        if common_start >= common_end:
+            raise ValidationError(
+                f"Track {number:02d} has no comparable PCM across {profile} scenarios"
+            )
+        matches = len({
+            pcm_window_hash(
+                item.path,
+                common_start - item.write_offset,
+                common_end - common_start,
+            )
+            for item in outputs
+        }) == 1
+    if not matches:
+        raise ValidationError(
+            f"Track {number:02d} differs across {profile} scenarios"
+        )
+
+
 def clean_tracks(manifest):
     return {
         number
@@ -483,7 +586,12 @@ def validate_scenario(launcher, profile_dir, manifest, scenario, workdir):
                 raise ValidationError(
                     f"strict combined mode created output: {scenario['name']}"
                 )
-    return separate_hashes
+    return parity_outputs(
+        manifest,
+        expected,
+        separate_hashes,
+        separate_dir / "validation.log",
+    )
 
 
 @contextmanager
@@ -537,7 +645,7 @@ def validate(args):
 
             for scenario in manifest["scenarios"]:
                 print(f"[{profile}] {scenario['name']}", flush=True)
-                hashes = validate_scenario(
+                outputs = validate_scenario(
                     launcher,
                     profile_dir,
                     manifest,
@@ -545,14 +653,11 @@ def validate(args):
                     workdir / profile,
                 )
                 if not scenario.get("expected_media_errors", False):
-                    for number, digest in hashes.items():
-                        parity.setdefault((profile, number), set()).add(digest)
+                    for number, output in outputs.items():
+                        parity.setdefault((profile, number), []).append(output)
 
-        for (profile, number), hashes in parity.items():
-            if len(hashes) != 1:
-                raise ValidationError(
-                    f"Track {number:02d} differs across {profile} scenarios"
-                )
+        for (profile, number), outputs in parity.items():
+            validate_track_parity(profile, number, outputs)
 
     if not args.skip_source_hashes:
         print("\nRechecking captured source hashes...", flush=True)
