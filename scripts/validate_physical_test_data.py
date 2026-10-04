@@ -303,6 +303,9 @@ def assert_offline_log(log_path):
 def expected_accuraterip_tracks(manifest, scenario):
     if scenario.get("expected_media_errors", False):
         return ()
+    disc_tracks = manifest["layout"]["tracks"]
+    if disc_tracks and disc_tracks[0]["kind"] == "data":
+        return ()
     return tuple(
         number
         for number in scenario["selected_tracks"]

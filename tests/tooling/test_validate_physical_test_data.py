@@ -263,6 +263,15 @@ class ValidatePhysicalTestDataTests(unittest.TestCase):
             ),
             (),
         )
+        data_first = synthetic_manifest()
+        data_first["layout"]["tracks"] = [
+            data_first["layout"]["tracks"][1],
+            data_first["layout"]["tracks"][0],
+        ]
+        self.assertEqual(
+            validate.expected_accuraterip_tracks(data_first, scenario),
+            (),
+        )
 
         with tempfile.TemporaryDirectory() as directory:
             log = Path(directory) / "validation.log"

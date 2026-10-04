@@ -225,8 +225,9 @@ SCSI/C2 fixtures obey both default and strict policies. Audio parity still
 requires every shared PCM frame to match exactly; data parity requires an
 exact whole-file hash match. Every error-free scenario containing numbered
 audio tracks must also verify every such track against AccurateRip. Track 0,
-data-only scenarios, and captures intentionally containing media errors are
-excluded from that requirement.
+data-only scenarios, data-first discs (typically games with CDDA tracks), and
+captures intentionally containing media errors are excluded from that
+requirement.
 
 Generated WAVs and ISOs use a temporary directory and are removed after the
 run. To inspect them, provide a new path with `--keep-work=PATH`. Restrict a
