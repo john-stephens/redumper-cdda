@@ -1,4 +1,6 @@
 import unittest
+import tempfile
+from pathlib import Path
 
 from redumper_cdda.adapters.cdparanoia import CdparanoiaTocReader
 from redumper_cdda.domain.errors import LayoutError, TocParseError
@@ -59,6 +61,30 @@ class CdparanoiaTocReaderTests(unittest.TestCase):
         with self.assertRaisesRegex(TocParseError, "Could not parse") as caught:
             reader.read("/dev/sr0")
         self.assertIsInstance(caught.exception.__cause__, RuntimeError)
+
+    def test_reads_captured_toc_from_file_without_running_cdparanoia(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cdparanoia.txt"
+            path.write_text(
+                " 1.  75 [00:01.00]  150 [00:02.00]\n",
+                encoding="utf-8",
+            )
+            runner = FakeRunner(None)
+            reporter = RecordingReporter()
+
+            layout = CdparanoiaTocReader(runner, reporter, path).read("-")
+
+            self.assertEqual(layout.tracks[0].end_lba, 225)
+            self.assertEqual(runner.calls, [])
+            self.assertIn("file", reporter.events[0].values)
+
+    def test_file_read_failure_is_typed(self):
+        reader = CdparanoiaTocReader(
+            FakeRunner(None), RecordingReporter(), Path("/missing/toc.txt")
+        )
+        with self.assertRaisesRegex(LayoutError, "Could not read cdparanoia") as caught:
+            reader.read("-")
+        self.assertIsInstance(caught.exception.__cause__, OSError)
 
 
 if __name__ == "__main__":

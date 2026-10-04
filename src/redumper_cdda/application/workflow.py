@@ -1,7 +1,7 @@
 """Extraction use-case coordinator."""
 
 from ..domain.events import LifecycleEvent
-from ..domain.extraction import ExtractionResult
+from ..domain.extraction import AcquisitionResult, ExtractionResult
 from ..domain.errors import IntegrityStatusError, OutputError, VerificationError
 
 
@@ -38,11 +38,30 @@ class ExtractionApplication:
             self._reporter.publish(
                 LifecycleEvent("plan", {"plan": plan, "request": request})
             )
-            before = workspace.snapshot()
-            acquisition = self._acquirer.acquire(plan, request)
+            acquisition = None
+            if request.existing_dump is not None:
+                copied = workspace.stage_existing_dump(
+                    request.existing_dump, plan.image_name
+                )
+                self._reporter.publish(
+                    LifecycleEvent(
+                        "existing_dump_staged",
+                        {"source": request.existing_dump, "files": copied},
+                    )
+                )
+                before = workspace.snapshot()
+            else:
+                before = workspace.snapshot()
+                acquisition = self._acquirer.acquire(plan, request)
             split = self._splitter.split(
                 plan, request, acquisition, before, workspace.changed_files
             )
+            if acquisition is None:
+                if split.media_errors is None:
+                    raise IntegrityStatusError(
+                        "Could not determine SCSI/C2 status from the existing dump."
+                    )
+                acquisition = AcquisitionResult(split.media_errors, 0)
             for item in split.omitted:
                 self._reporter.publish(LifecycleEvent("omitted", item))
             self._reporter.publish(

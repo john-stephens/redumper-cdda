@@ -34,7 +34,12 @@ class ArgumentParserFactory:
             ),
         )
         parser.add_argument(
-            "device", help="SCSI generic optical-drive path, such as /dev/sg4"
+            "device",
+            nargs="?",
+            help=(
+                "SCSI generic optical-drive path, such as /dev/sg4; optional "
+                "with --existing-dump and --cdparanoia-toc-file"
+            ),
         )
         parser.add_argument(
             "track", type=self.track_selection, nargs="?",
@@ -71,6 +76,22 @@ class ArgumentParserFactory:
             type=Path,
             metavar="PATH",
             help="write complete verbose diagnostics to PATH",
+        )
+        parser.add_argument(
+            "--existing-dump",
+            type=Path,
+            metavar="PATH",
+            help=(
+                "use an existing redumper dump, specified as its path without "
+                "an extension; copy it to the temporary workspace and skip "
+                "dump/refine"
+            ),
+        )
+        parser.add_argument(
+            "--cdparanoia-toc-file",
+            type=Path,
+            metavar="PATH",
+            help="read captured cdparanoia -Q text output from PATH",
         )
         parser.add_argument(
             "-X", "--abort-on-skip", action="store_true",
@@ -141,8 +162,17 @@ class SystemDependencyChecker:
     def __init__(self, which=shutil.which):
         self._which = which
 
-    def check(self, show_layout=False):
-        required = ["cdparanoia", "sg_raw"]
+    def check(
+        self,
+        show_layout=False,
+        mmc_from_files=False,
+        cdparanoia_from_file=False,
+    ):
+        required = []
+        if not cdparanoia_from_file:
+            required.append("cdparanoia")
+        if not mmc_from_files:
+            required.append("sg_raw")
         if not show_layout:
             required.append("redumper")
         for executable in required:
@@ -166,8 +196,13 @@ class CliApplication:
     def execute(self, argv=None):
         parser = self._parser_factory().create()
         args = parser.parse_args(argv)
+        self._resolve_offline_positionals(args)
         self._validate(parser, args)
-        self._dependency_checker.check(args.show_layout)
+        self._dependency_checker.check(
+            args.show_layout,
+            mmc_from_files=args.existing_dump is not None,
+            cdparanoia_from_file=args.cdparanoia_toc_file is not None,
+        )
         with ExitStack() as stack:
             reporter = self._reporter_factory(args.verbose, args.quiet)
             if args.log_file is not None:
@@ -183,14 +218,20 @@ class CliApplication:
                     reporter,
                     VerboseReporter(partial(print, file=stream)),
                 )
-            application = self._application_factory(reporter)
+            application = self._application_factory(
+                reporter,
+                existing_dump=args.existing_dump,
+                cdparanoia_toc_file=args.cdparanoia_toc_file,
+            )
             if args.show_layout:
                 reporter.publish(
-                    LifecycleEvent("disc_layout", application.read_layout(args.device))
+                    LifecycleEvent(
+                        "disc_layout", application.read_layout(args.device or "-")
+                    )
                 )
                 return 0
             request = ExtractionRequest(
-                device=args.device,
+                device=args.device or "-",
                 selection=args.track,
                 include_data=args.include_data,
                 single_file=args.single_file,
@@ -200,12 +241,37 @@ class CliApplication:
                 refine_passes=args.refine_passes,
                 abort_on_skip=args.abort_on_skip,
                 accuraterip=args.accuraterip,
+                existing_dump=args.existing_dump,
             )
             application.run(request)
             return 0
 
     @staticmethod
+    def _resolve_offline_positionals(args):
+        if not (
+            args.existing_dump is not None
+            and args.cdparanoia_toc_file is not None
+            and args.device is not None
+            and args.track == TrackSelection()
+        ):
+            return
+        try:
+            selection = ArgumentParserFactory.track_selection(args.device)
+        except argparse.ArgumentTypeError:
+            return
+        args.device = None
+        args.track = selection
+
+    @staticmethod
     def _validate(parser, args):
+        if args.device in (None, "-") and not (
+            args.existing_dump is not None
+            and args.cdparanoia_toc_file is not None
+        ):
+            parser.error(
+                "device is required unless --existing-dump and "
+                "--cdparanoia-toc-file are supplied"
+            )
         if args.retries < 0:
             parser.error("invalid retry count")
         if (

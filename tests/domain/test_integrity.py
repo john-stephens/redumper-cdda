@@ -11,6 +11,7 @@ from redumper_cdda.domain.integrity import (
 class IntegrityDomainTests(unittest.TestCase):
     def test_media_errors(self):
         self.assertFalse(MediaErrors(0, 0, 3).has_data_errors)
+        self.assertFalse(MediaErrors(0, 0, None).has_data_errors)
         self.assertTrue(MediaErrors(1, 0, 0).has_data_errors)
         self.assertTrue(MediaErrors(0, 1, 0).has_data_errors)
         with self.assertRaisesRegex(DomainModelError, "negative"):

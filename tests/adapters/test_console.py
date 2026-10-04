@@ -94,15 +94,33 @@ class ConsoleReporterTests(unittest.TestCase):
         reporter.publish(LifecycleEvent("omitted", omitted))
         clean = SimpleNamespace(acquisition=SimpleNamespace(media_errors=MediaErrors(0, 0, 1)), omitted=())
         reporter.publish(LifecycleEvent("complete", clean))
+        reporter.publish(
+            LifecycleEvent(
+                "complete",
+                SimpleNamespace(
+                    acquisition=SimpleNamespace(
+                        media_errors=MediaErrors(0, 0, None)
+                    ),
+                    omitted=(),
+                ),
+            )
+        )
         reporter.publish(LifecycleEvent("complete", SimpleNamespace(acquisition=clean.acquisition, omitted=(omitted,))))
         reporter.publish(LifecycleEvent("complete", SimpleNamespace(acquisition=clean.acquisition, omitted=(omitted, omitted))))
         reporter.publish(LifecycleEvent("disc_layout", DiscLayout((self.track, self.data), 30)))
+        reporter.publish(
+            LifecycleEvent(
+                "existing_dump_staged",
+                {"source": Path("disc"), "files": (Path("disc.state"),)},
+            )
+        )
         reporter.publish(LifecycleEvent("unknown"))
         rendered = "\n".join(line for line, _options in self.lines)
         self.assertIn("Ripping track 01", rendered)
         self.assertIn("Reading:  50% SCSI=1 C2=2 Q=3", rendered)
         self.assertIn("Skipping Track 01", rendered)
         self.assertIn("data", rendered)
+        self.assertIn("Q=unavailable", rendered)
 
     def test_verbose_all_events(self):
         reporter = VerboseReporter(self.output)
@@ -148,6 +166,14 @@ class ConsoleReporterTests(unittest.TestCase):
             LifecycleEvent("refinement_started", {"pass_number": 1, "maximum": 2, "range": SimpleNamespace(start_lba=10, end_lba=21)}),
             LifecycleEvent("refinement_started", {"pass_number": 2, "maximum": None, "range": SimpleNamespace(start_lba=10, end_lba=21)}),
             LifecycleEvent("media_errors", {"errors": MediaErrors(1, 2, 3)}),
+            LifecycleEvent("media_errors", {"errors": MediaErrors(0, 0, None)}),
+            LifecycleEvent(
+                "existing_dump_staged",
+                {
+                    "source": Path("disc"),
+                    "files": (Path("disc.state"), Path("disc.scram")),
+                },
+            ),
             LifecycleEvent("split_started"),
             LifecycleEvent("omitted", SimpleNamespace(plan=SimpleNamespace(track=self.track), media_errors=TrackMediaErrors(1, 1, 1, 1))),
             LifecycleEvent("output_detail", resolved),
@@ -155,6 +181,16 @@ class ConsoleReporterTests(unittest.TestCase):
             LifecycleEvent("output_detail", data),
             LifecycleEvent("verification_report", report),
             LifecycleEvent("complete", result),
+            LifecycleEvent(
+                "complete",
+                SimpleNamespace(
+                    plan=self.plan,
+                    acquisition=SimpleNamespace(
+                        media_errors=MediaErrors(0, 0, None),
+                        refine_passes_used=0,
+                    ),
+                ),
+            ),
             LifecycleEvent("disc_layout", DiscLayout((self.track,), 20)),
             LifecycleEvent("unknown"),
         )
@@ -164,6 +200,8 @@ class ConsoleReporterTests(unittest.TestCase):
         self.assertIn("Physical read range", rendered)
         self.assertIn("Refine pass 2 (until clean)", rendered)
         self.assertIn("WARNING", rendered)
+        self.assertIn("Source prefix: disc", rendered)
+        self.assertIn("Final Q errors:     unavailable", rendered)
 
 
 if __name__ == "__main__":

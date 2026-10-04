@@ -1,5 +1,7 @@
 """MMC READ TOC format-0 layout adapter."""
 
+from pathlib import Path
+
 from ..domain.disc import DiscLayout, Track, TrackKind
 from ..domain.errors import LayoutError, TocParseError
 from ..domain.events import LifecycleEvent
@@ -11,9 +13,13 @@ MMC_FULL_TOC_ALLOCATION_LENGTH = 4096
 
 
 class MmcTocReader:
-    def __init__(self, runner, reporter):
+    def __init__(self, runner, reporter, toc_path=None, full_toc_path=None):
         self._runner = runner
         self._reporter = reporter
+        self._toc_path = Path(toc_path) if toc_path is not None else None
+        self._full_toc_path = (
+            Path(full_toc_path) if full_toc_path is not None else None
+        )
 
     @staticmethod
     def command(device):
@@ -60,6 +66,8 @@ class MmcTocReader:
         ]
 
     def read(self, device):
+        if self._toc_path is not None:
+            return self._read_files()
         self._reporter.publish(
             LifecycleEvent(
                 "layout_read", "Reading complete track layout with MMC READ TOC..."
@@ -71,10 +79,28 @@ class MmcTocReader:
             self.full_toc_command(device), "MMC READ TOC format 2"
         )
 
+        return self._parse(result.output, full_toc_result.output)
+
+    def _read_files(self):
+        self._reporter.publish(
+            LifecycleEvent(
+                "layout_read",
+                "Reading complete track layout from MMC TOC files...",
+            )
+        )
         try:
-            parsed = parse_mmc_toc(result.output)
+            toc = self._toc_path.read_bytes()
+            full_toc = self._full_toc_path.read_bytes()
+        except OSError as exc:
+            raise LayoutError(f"Could not read MMC TOC file: {exc}") from exc
+        return self._parse(toc, full_toc)
+
+    @staticmethod
+    def _parse(toc, full_toc):
+        try:
+            parsed = parse_mmc_toc(toc)
             parsed = apply_session_boundaries(
-                parsed, parse_mmc_full_toc(full_toc_result.output)
+                parsed, parse_mmc_full_toc(full_toc)
             )
             tracks = tuple(_track(item) for item in parsed)
             return DiscLayout(tracks, tracks[-1].end_lba)

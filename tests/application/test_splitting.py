@@ -160,6 +160,70 @@ class SplitServiceTests(unittest.TestCase):
         self.assertEqual(result.outputs[0].cue_path, Path("two.cue"))
         self.assertEqual(len(result.verification_tracks), 2)
 
+    def test_existing_dump_integrity_is_read_from_state_after_split(self):
+        track = Track(1, TrackKind.AUDIO, 0, 0, 10)
+        output = OutputPlan(track, OutputKind.AUDIO, (track,), 10, Path("one.wav"))
+        plan = SimpleNamespace(
+            outputs=(output,), workdir=Path("/work"), image_name="track01",
+            selection=SimpleNamespace(tracks=(track,), first_track=track),
+        )
+        request = SimpleNamespace(
+            abort_on_skip=False, single_file=False, accuraterip=False
+        )
+        parser = mock.Mock()
+        offsets = object()
+        parser.write_offsets.return_value = offsets
+        inspector = mock.Mock()
+        inspector.inspect.return_value = {1: TrackMediaErrors(2, 3, 1, 1)}
+        audio = mock.Mock()
+        audio.resolve.return_value = (
+            (AudioSegment(Path("one.bin"), 1, 0, 10, 10),),
+            Path("one.cue"),
+            0,
+        )
+        reporter = RecordingReporter()
+        redumper = mock.Mock()
+        redumper.split.return_value = CommandResult((), 0, "disc write offset: 0")
+        service = SplitService(
+            redumper, parser, inspector, audio, mock.Mock(), reporter
+        )
+
+        result = service.split(plan, request, None, {}, lambda _before: [])
+
+        self.assertEqual(result.media_errors, MediaErrors(2, 3, None))
+        inspector.inspect.assert_called_once_with(
+            Path("/work/track01.state"), (track,), offsets
+        )
+        warnings = [
+            event.values for event in reporter.events if event.name == "warning"
+        ]
+        self.assertEqual(len(warnings), 2)
+
+    def test_existing_dump_applies_both_strict_error_policies(self):
+        track = Track(1, TrackKind.AUDIO, 0, 0, 10)
+        output = OutputPlan(track, OutputKind.AUDIO, (track,), 10, Path("one.wav"))
+        plan = SimpleNamespace(
+            outputs=(output,), workdir=Path("/work"), image_name="track01",
+            selection=SimpleNamespace(tracks=(track,), first_track=track),
+        )
+        parser = mock.Mock()
+        parser.write_offsets.return_value = object()
+        inspector = mock.Mock()
+        inspector.inspect.return_value = {1: TrackMediaErrors(1, 0, 1, 0)}
+        service, _redumper = self.service(parser=parser, inspector=inspector)
+
+        single = SimpleNamespace(
+            abort_on_skip=True, single_file=True, accuraterip=False
+        )
+        with self.assertRaisesRegex(IntegrityStatusError, "single-file"):
+            service.split(plan, single, None, {}, lambda _before: [])
+
+        separate = SimpleNamespace(
+            abort_on_skip=True, single_file=False, accuraterip=False
+        )
+        with self.assertRaisesRegex(IntegrityStatusError, "every selected"):
+            service.split(plan, separate, None, {}, lambda _before: [])
+
 
 if __name__ == "__main__":
     unittest.main()

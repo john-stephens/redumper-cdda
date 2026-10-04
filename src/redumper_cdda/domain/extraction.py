@@ -66,6 +66,7 @@ class ExtractionRequest:
     refine_passes: int
     abort_on_skip: bool
     accuraterip: bool
+    existing_dump: object = None
 
 
 @dataclass(frozen=True)

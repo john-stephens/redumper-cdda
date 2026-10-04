@@ -2,6 +2,7 @@
 
 from ..domain.errors import IntegrityStatusError, SplitError
 from ..domain.events import LifecycleEvent
+from ..domain.integrity import MediaErrors
 from ..domain.outputs import (
     OmittedOutput,
     OutputKind,
@@ -50,9 +51,49 @@ class SplitService:
             )
 
         output_plans = plan.outputs
+        imported_errors = None
+        errors_by_track = None
         try:
+            if acquisition is None:
+                errors_by_track = self._inspect_errors(plan, result.output)
+                imported_errors = MediaErrors(
+                    sum(item.scsi_samples for item in errors_by_track.values()),
+                    sum(item.c2_samples for item in errors_by_track.values()),
+                    None,
+                )
+                self._reporter.publish(
+                    LifecycleEvent(
+                        "media_errors",
+                        {"errors": imported_errors, "pass_number": None},
+                    )
+                )
+                self._reporter.publish(
+                    LifecycleEvent(
+                        "warning",
+                        "Q error status is unavailable for an existing dump",
+                    )
+                )
+                self._apply_single_file_policy(request, imported_errors)
+                if imported_errors.has_data_errors and not request.abort_on_skip:
+                    self._reporter.publish(
+                        LifecycleEvent(
+                            "warning",
+                            "writing output from the existing dump with unresolved "
+                            f"SCSI={imported_errors.scsi}, "
+                            f"C2={imported_errors.c2} samples",
+                        )
+                    )
             output_plans, omitted = self._filter_errors(
-                plan, request, acquisition, result.output, output_plans
+                plan,
+                request,
+                (
+                    imported_errors
+                    if acquisition is None
+                    else acquisition.media_errors
+                ),
+                result.output,
+                output_plans,
+                errors_by_track,
             )
         except IntegrityStatusError as exc:
             raise IntegrityStatusError(
@@ -70,21 +111,19 @@ class SplitService:
         resolved, verification = self._resolve_sources(
             plan, output_plans, changed, request.accuraterip
         )
-        return SplitResult(resolved, omitted, verification)
+        return SplitResult(resolved, omitted, verification, imported_errors)
 
-    def _filter_errors(self, plan, request, acquisition, split_output, outputs):
+    def _filter_errors(
+        self, plan, request, media_errors, split_output, outputs, errors_by_track=None
+    ):
         if not (
-            acquisition.media_errors.has_data_errors
+            media_errors.has_data_errors
             and request.abort_on_skip
             and not request.single_file
         ):
             return outputs, ()
-        offsets = self._integrity_parser.write_offsets(split_output)
-        errors_by_track = self._state_inspector.inspect(
-            plan.workdir / f"{plan.image_name}.state",
-            plan.selection.tracks,
-            offsets,
-        )
+        if errors_by_track is None:
+            errors_by_track = self._inspect_errors(plan, split_output)
         clean = []
         omitted = []
         for output in outputs:
@@ -94,6 +133,25 @@ class SplitService:
             else:
                 clean.append(output)
         return tuple(clean), tuple(omitted)
+
+    def _inspect_errors(self, plan, split_output):
+        offsets = self._integrity_parser.write_offsets(split_output)
+        return self._state_inspector.inspect(
+            plan.workdir / f"{plan.image_name}.state",
+            plan.selection.tracks,
+            offsets,
+        )
+
+    @staticmethod
+    def _apply_single_file_policy(request, errors):
+        if errors.has_data_errors and request.abort_on_skip and request.single_file:
+            raise IntegrityStatusError(
+                "SCSI/C2 errors remain in the existing dump.\n"
+                f"Remaining SCSI error samples: {errors.scsi}\n"
+                f"Remaining C2 error samples:   {errors.c2}\n"
+                "No output file was created because --abort-on-skip was "
+                "specified with --single-file."
+            )
 
     def _resolve_sources(self, plan, output_plans, changed, accuraterip):
         track_zero_sectors = (

@@ -35,13 +35,17 @@ class ArgumentParserFactoryTests(unittest.TestCase):
         args = cli.ArgumentParserFactory().create().parse_args(
             ["/dev/sg4", "2", "-s", "--output", "x.wav", "-p", "album",
              "--retries", "5", "--refine-passes", "2", "--refine-forever",
-             "--log-file", "rip.log", "-X", "--no-accuraterip"]
+             "--log-file", "rip.log", "--existing-dump", "/dumps/disc",
+             "--cdparanoia-toc-file", "cdparanoia.txt",
+             "-X", "--no-accuraterip"]
         )
         self.assertEqual(args.track, TrackSelection(2, 2))
         self.assertEqual(args.output, Path("x.wav"))
         self.assertFalse(args.accuraterip)
         self.assertIsNone(args.refine_passes)
         self.assertEqual(args.log_file, Path("rip.log"))
+        self.assertEqual(args.existing_dump, Path("/dumps/disc"))
+        self.assertEqual(args.cdparanoia_toc_file, Path("cdparanoia.txt"))
 
         unlimited = cli.ArgumentParserFactory().create().parse_args(
             ["/dev/sg4", "--refine-passes=0"]
@@ -53,7 +57,8 @@ class ArgumentParserFactoryTests(unittest.TestCase):
             "--output", "--retries", "--refine-passes", "--refine-forever",
             "--log-file", "--abort-on-skip", "--single-file", "--prefix",
             "--include-data", "--show-layout", "--no-accuraterip",
-            "--verbose", "--quiet",
+            "--existing-dump", "--verbose", "--quiet",
+            "--cdparanoia-toc-file",
         ):
             self.assertIn(option, help_text)
         self.assertIn("0 means unlimited", help_text)
@@ -67,6 +72,19 @@ class SystemDependencyCheckerTests(unittest.TestCase):
         self.assertEqual(calls, ["cdparanoia", "sg_raw"])
         System.check(show_layout=False)
         self.assertEqual(calls[-3:], ["cdparanoia", "sg_raw", "redumper"])
+        calls.clear()
+        System.check(
+            show_layout=True,
+            mmc_from_files=True,
+            cdparanoia_from_file=True,
+        )
+        self.assertEqual(calls, [])
+        System.check(
+            show_layout=False,
+            mmc_from_files=True,
+            cdparanoia_from_file=True,
+        )
+        self.assertEqual(calls, ["redumper"])
 
     def test_missing_tool_is_typed_error(self):
         with self.assertRaisesRegex(DependencyError, "sg_raw"):
@@ -82,7 +100,7 @@ class CliApplicationTests(unittest.TestCase):
         checker = mock.Mock()
         command = cli.CliApplication(
             dependency_checker=checker,
-            application_factory=lambda _reporter: application,
+            application_factory=lambda _reporter, **_options: application,
             reporter_factory=lambda _verbose, _quiet: reporter,
         )
         return command, checker, application, reporter
@@ -96,13 +114,18 @@ class CliApplicationTests(unittest.TestCase):
         self.assertEqual(request.selection, TrackSelection(2, 2))
         self.assertFalse(request.accuraterip)
         self.assertEqual(request.refine_passes, cli.DEFAULT_REFINE_PASSES)
-        checker.check.assert_called_once_with(False)
+        self.assertIsNone(request.existing_dump)
+        checker.check.assert_called_once_with(
+            False,
+            mmc_from_files=False,
+            cdparanoia_from_file=False,
+        )
 
     def test_log_file_receives_verbose_events_with_concise_console(self):
         checker = mock.Mock()
 
         class Application:
-            def __init__(self, reporter):
+            def __init__(self, reporter, **_options):
                 self.reporter = reporter
 
             def run(self, request):
@@ -138,7 +161,11 @@ class CliApplicationTests(unittest.TestCase):
         self.assertEqual(command.execute(["drive", "--show-layout"]), 0)
         self.assertEqual(reporter.publish.call_args.args[0].name, "disc_layout")
         application.run.assert_not_called()
-        checker.check.assert_called_once_with(True)
+        checker.check.assert_called_once_with(
+            True,
+            mmc_from_files=False,
+            cdparanoia_from_file=False,
+        )
 
     def test_show_layout_ignores_extraction_only_output_validation(self):
         command, _checker, application, _reporter = self.make_cli()
@@ -153,15 +180,93 @@ class CliApplicationTests(unittest.TestCase):
 
     def test_cli_only_validation(self):
         invalid = (
+            ([], "2"),
             (["drive", "--retries", "-1"], "retry"),
             (["drive", "--refine-passes", "-1"], "2"),
             (["drive", "--prefix", "../x"], "prefix"),
             (["drive", "--output", "x.wav"], "single-file"),
             (["drive", "-d", "-s", "1-2"], "track range"),
+            (["drive", "--mmc-toc-file", "disc.toc"], "2"),
+            (["-", "--show-layout"], "2"),
+            (
+                [
+                    "-", "--show-layout",
+                    "--cdparanoia-toc-file", "cd.txt",
+                ],
+                "2",
+            ),
         )
         for arguments, message in invalid:
             with self.subTest(arguments=arguments), redirect_stderr(io.StringIO()), self.assertRaisesRegex(SystemExit, "2"):
                 cli.CliApplication().execute(arguments)
+
+    def test_offline_layout_files_are_passed_to_composition(self):
+        checker = mock.Mock()
+        application = mock.Mock()
+        application.read_layout.return_value = DiscLayout(
+            (Track(1, TrackKind.AUDIO, 0, 0, 10),), 10
+        )
+        factory = mock.Mock(return_value=application)
+        command = cli.CliApplication(
+            dependency_checker=checker,
+            application_factory=factory,
+            reporter_factory=lambda _verbose, _quiet: mock.Mock(),
+        )
+
+        self.assertEqual(
+            command.execute(
+                [
+                    "--show-layout",
+                    "--existing-dump", "dump/disc",
+                    "--cdparanoia-toc-file", "cd.txt",
+                ]
+            ),
+            0,
+        )
+        checker.check.assert_called_once_with(
+            True, mmc_from_files=True, cdparanoia_from_file=True
+        )
+        factory.assert_called_once_with(
+            mock.ANY,
+            existing_dump=Path("dump/disc"),
+            cdparanoia_toc_file=Path("cd.txt"),
+        )
+        application.read_layout.assert_called_once_with("-")
+
+    def test_offline_extraction_uses_existing_dump_without_drive_tools(self):
+        command, checker, application, _reporter = self.make_cli()
+        arguments = [
+            "2", "--existing-dump", "dump/disc",
+            "--cdparanoia-toc-file", "cd.txt",
+        ]
+
+        self.assertEqual(command.execute(arguments), 0)
+
+        checker.check.assert_called_once_with(
+            False, mmc_from_files=True, cdparanoia_from_file=True
+        )
+        request = application.run.call_args.args[0]
+        self.assertEqual(request.device, "-")
+        self.assertEqual(request.selection, TrackSelection(2, 2))
+        self.assertEqual(request.existing_dump, Path("dump/disc"))
+
+    def test_offline_sources_can_still_use_an_explicit_device(self):
+        command, _checker, application, _reporter = self.make_cli()
+
+        self.assertEqual(
+            command.execute(
+                [
+                    "/dev/sg4",
+                    "--existing-dump", "dump/disc",
+                    "--cdparanoia-toc-file", "cd.txt",
+                ]
+            ),
+            0,
+        )
+
+        request = application.run.call_args.args[0]
+        self.assertEqual(request.device, "/dev/sg4")
+        self.assertEqual(request.selection, TrackSelection())
 
 
 class CliBoundaryTests(unittest.TestCase):

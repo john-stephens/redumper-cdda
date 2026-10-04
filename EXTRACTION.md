@@ -15,6 +15,13 @@ The command fails closed if the two sources disagree, except for the validated
 enhanced-CD case where cdparanoia extends the last audio track to a later
 session's data-track start. In that case the full-TOC session lead-out wins.
 
+When an existing dump prefix is supplied, its `.toc` and `.fulltoc` artifacts
+provide the MMC format-0 and full-TOC format-2 responses. A separately captured
+cdparanoia text file completes the file-backed layout. Parsing,
+session-boundary derivation, audio-track-set checks, and exact boundary
+reconciliation remain identical to live reads. The combined inputs permit
+layout planning and extraction without physical media.
+
 For a selected audio track:
 
 ``` text
@@ -58,6 +65,15 @@ applied, the intentionally partial image is split with
 selected track's file-relative INDEX 01. The script starts there, then
 consumes subsequent AUDIO BINs from sector zero until exactly
 `cdparanoia`'s reported track length has been collected.
+
+When `--existing-dump=PATH` is supplied, `PATH` is the redumper image prefix
+without an extension. Primary dump artifacts are copied and renamed inside the
+temporary workspace; the source files are never modified. Initial dump and
+refinement are skipped. Splitting supplies the write-offset mapping needed to
+inspect the copied state file across the selected logical track ranges before
+output policy is applied. Missing or malformed state and offset information
+fails closed. SCSI/C2 values for this mode are unresolved sample counts from
+the state file; historical Q counts are unavailable.
 
 Output packaging does not change acquisition. By default, each selected track
 is written separately as `PREFIXNN.wav` or `PREFIXNN.iso`. `--single-file`

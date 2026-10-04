@@ -9,10 +9,15 @@ from .errors import DomainModelError
 class MediaErrors:
     scsi: int
     c2: int
-    q: int
+    q: object
 
     def __post_init__(self):
-        if min(self.scsi, self.c2, self.q) < 0:
+        values = (
+            (self.scsi, self.c2)
+            if self.q is None
+            else (self.scsi, self.c2, self.q)
+        )
+        if min(values) < 0:
             raise DomainModelError("Media-error counts cannot be negative.")
 
     @property

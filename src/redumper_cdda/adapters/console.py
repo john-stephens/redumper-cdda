@@ -54,6 +54,9 @@ class ConciseReporter:
             "omitted": self._omitted,
             "complete": self._complete,
             "disc_layout": self._disc_layout,
+            "existing_dump_staged": lambda values: self._output(
+                f"Using existing dump: {values['source']}"
+            ),
         }
         handler = handlers.get(event.name)
         if handler is not None:
@@ -112,7 +115,8 @@ class ConciseReporter:
                 "due to unresolved SCSI/C2 errors."
             )
         else:
-            self._output(f"Done. SCSI={errors.scsi}, C2={errors.c2}, Q={errors.q}")
+            q = "unavailable" if errors.q is None else errors.q
+            self._output(f"Done. SCSI={errors.scsi}, C2={errors.c2}, Q={q}")
 
     def _disc_layout(self, layout):
         self._output("\nDisc track layout\n-----------------")
@@ -189,6 +193,7 @@ class VerboseReporter:
             "verification_report": self._verification,
             "complete": self._complete,
             "disc_layout": ConciseReporter(self._output)._disc_layout,
+            "existing_dump_staged": self._existing_dump_staged,
         }
         handler = handlers.get(event.name)
         if handler is not None:
@@ -232,11 +237,17 @@ class VerboseReporter:
 
     def _media_errors(self, values):
         errors = values["errors"]
+        q = "unavailable" if errors.q is None else errors.q
         self._output(
             "\nData integrity\n==============\n\n"
-            f"SCSI: {errors.scsi}\nC2:   {errors.c2}\nQ:    {errors.q} "
+            f"SCSI: {errors.scsi}\nC2:   {errors.c2}\nQ:    {q} "
             "(reported, not used as audio-data failure criterion)"
         )
+
+    def _existing_dump_staged(self, values):
+        self._heading("Existing dump")
+        self._output(f"Source prefix: {values['source']}")
+        self._output(f"Copied files:  {len(values['files'])}")
 
     def _verification(self, report):
         concise = ConciseReporter(self._output)
@@ -271,7 +282,7 @@ class VerboseReporter:
             f"Refine passes used: {result.acquisition.refine_passes_used}\n"
             f"Final SCSI errors:  {errors.scsi}\n"
             f"Final C2 errors:    {errors.c2}\n"
-            f"Final Q errors:     {errors.q}\n"
+            f"Final Q errors:     {'unavailable' if errors.q is None else errors.q}\n"
             f"Integrity:          {'WARNING' if errors.has_data_errors else 'PASS'}"
         )
 

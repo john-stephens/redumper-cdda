@@ -16,6 +16,7 @@ class FakeWorkspaceFactory:
         self.workspace = SimpleNamespace(
             path=Path("/work"), snapshot=lambda: {"before": True},
             changed_files=lambda before: [before],
+            stage_existing_dump=mock.Mock(return_value=(Path("/work/track01.state"),)),
         )
 
     @contextmanager
@@ -29,7 +30,7 @@ class ExtractionApplicationTests(unittest.TestCase):
         self.disc = object()
         self.layout.read.return_value = self.disc
         self.planner = mock.Mock()
-        self.plan = SimpleNamespace(outputs=())
+        self.plan = SimpleNamespace(outputs=(), image_name="track01")
         self.planner.create.return_value = self.plan
         self.acquirer = mock.Mock()
         self.acquisition = SimpleNamespace(media_errors=MediaErrors(0, 0, 0))
@@ -48,8 +49,12 @@ class ExtractionApplicationTests(unittest.TestCase):
             self.reporter,
         )
 
-    def request(self, accuraterip=False):
-        return SimpleNamespace(device="drive", accuraterip=accuraterip)
+    def request(self, accuraterip=False, existing_dump=None):
+        return SimpleNamespace(
+            device="drive",
+            accuraterip=accuraterip,
+            existing_dump=existing_dump,
+        )
 
     def test_read_layout_and_successful_run(self):
         self.assertIs(self.application.read_layout("drive"), self.disc)
@@ -74,6 +79,29 @@ class ExtractionApplicationTests(unittest.TestCase):
         names = [event.name for event in self.reporter.events]
         self.assertLess(names.index("output_finished"), names.index("verification_started"))
         self.assertIn("verification_report", names)
+
+    def test_existing_dump_is_staged_and_skips_acquisition(self):
+        errors = MediaErrors(0, 0, None)
+        self.splitter.split.return_value = SplitResult((), media_errors=errors)
+
+        result = self.application.run(
+            self.request(existing_dump=Path("/archive/disc"))
+        )
+
+        self.workspace.workspace.stage_existing_dump.assert_called_once_with(
+            Path("/archive/disc"), self.plan.image_name
+        )
+        self.acquirer.acquire.assert_not_called()
+        self.assertEqual(result.acquisition.media_errors, errors)
+        self.assertEqual(result.acquisition.refine_passes_used, 0)
+        self.assertIn(
+            "existing_dump_staged",
+            [event.name for event in self.reporter.events],
+        )
+
+    def test_existing_dump_without_integrity_status_fails_closed(self):
+        with self.assertRaisesRegex(IntegrityStatusError, "existing dump"):
+            self.application.run(self.request(existing_dump=Path("disc")))
 
     def test_disabled_verifier_skips_verification_even_when_requested(self):
         self.verifier.enabled = False

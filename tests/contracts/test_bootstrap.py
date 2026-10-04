@@ -1,6 +1,7 @@
 """Contract tests for the production composition root."""
 
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from redumper_cdda import bootstrap
@@ -18,6 +19,29 @@ class BootstrapTests(unittest.TestCase):
     def test_builds_production_object_graph(self):
         application = bootstrap.create_application(QuietReporter())
         self.assertIsInstance(application, ExtractionApplication)
+
+    def test_existing_dump_configures_matching_mmc_toc_files(self):
+        reporter = QuietReporter()
+        with (
+            mock.patch.object(bootstrap, "MmcTocReader") as mmc_reader,
+            mock.patch.object(bootstrap, "CdparanoiaTocReader") as audio_reader,
+        ):
+            application = bootstrap.create_application(
+                reporter,
+                existing_dump=Path("/archive/disc"),
+                cdparanoia_toc_file=Path("/archive/cd.txt"),
+            )
+
+        self.assertIsInstance(application, ExtractionApplication)
+        mmc_reader.assert_called_once_with(
+            mock.ANY,
+            reporter,
+            Path("/archive/disc.toc"),
+            Path("/archive/disc.fulltoc"),
+        )
+        audio_reader.assert_called_once_with(
+            mock.ANY, reporter, Path("/archive/cd.txt")
+        )
 
     def test_conversion_diagnostics_go_only_to_verbose_reporters(self):
         terminal = []

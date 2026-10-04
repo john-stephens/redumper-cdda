@@ -85,6 +85,7 @@ class SplitResult:
     outputs: tuple
     omitted: tuple = ()
     verification_tracks: tuple = ()
+    media_errors: object = None
 
 
 @dataclass(frozen=True)

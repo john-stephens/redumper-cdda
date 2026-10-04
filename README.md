@@ -69,6 +69,93 @@ Typical optional controls:
 redumper-cdda /dev/sg4 2 --retries=100 --refine-passes=3
 ```
 
+To reuse an existing redumper dump, pass the shared path prefix without any
+extension:
+
+``` bash
+redumper-cdda /dev/sg4 2 --existing-dump=/archive/disc
+```
+
+For example, `/archive/disc` identifies files such as `disc.scram`,
+`disc.state`, `disc.subcode`, and `disc.toc`. The required primary dump files
+are copied into the unique temporary workspace, so the supplied dump remains
+read-only. The command skips both `redumper dump` and `redumper refine`, then
+continues with one `redumper split --force-split` and the normal transactional
+output and AccurateRip phases. The dump must cover the requested logical range
+and its one-sector endpoint padding. Layout still requires MMC and cdparanoia
+data, either read from the optical disc or supplied through the file-backed TOC
+options described below.
+
+For an existing dump, unresolved SCSI/C2 state is determined from the copied
+`.state` file using the write-offset mapping reported by split. The same
+default and `--abort-on-skip` policies apply. Historical Q counts cannot be
+reconstructed from the dump state and are reported as unavailable.
+
+### File-backed TOCs and offline debugging
+
+When `--existing-dump` is supplied, layout acquisition automatically reads the
+matching redumper `.toc` and `.fulltoc` files. Only cdparanoia's captured text
+output needs a separate option:
+
+``` bash
+redumper-cdda --show-layout \
+  --existing-dump=/archive/disc \
+  --cdparanoia-toc-file=cdparanoia.txt
+```
+
+For `/archive/disc`, the application reads `/archive/disc.toc` as MMC READ TOC
+format 0 and `/archive/disc.fulltoc` as MMC full TOC format 2.
+`--cdparanoia-toc-file` accepts captured combined text output from
+`cdparanoia -Q`. All three inputs pass through the same parsers and strict
+MMC/cdparanoia reconciliation as live reads.
+
+#### Capturing TOC files for later offline use
+
+Redumper produces the required binary `.toc` and `.fulltoc` files as part of
+its normal dump. For example, a dump with this image prefix:
+
+``` bash
+redumper dump \
+  --drive=/dev/sg4 \
+  --image-path=/archive \
+  --image-name=disc
+```
+
+produces `/archive/disc.toc` and `/archive/disc.fulltoc` alongside the other
+dump artifacts. Keep them unchanged; `--existing-dump=/archive/disc` locates
+them automatically.
+
+Capture cdparanoia's complete textual query output, including stderr, because
+different cdparanoia builds may write the track table to different streams:
+
+``` bash
+cdparanoia -Q -d /dev/sg4 > cdparanoia.txt 2>&1
+```
+
+Keep `cdparanoia.txt` with the redumper dump. The captured inputs can be checked
+through the normal reconciliation path without the disc:
+
+``` bash
+redumper-cdda --show-layout \
+  --existing-dump=/archive/disc \
+  --cdparanoia-toc-file=cdparanoia.txt
+```
+
+For a completely media-free extraction, omit the device and supply the existing
+dump prefix plus the captured cdparanoia TOC:
+
+``` bash
+redumper-cdda 2 \
+  --existing-dump=/archive/disc \
+  --cdparanoia-toc-file=/archive/cdparanoia.txt
+```
+
+The track selection remains optional, so omitting `2` selects the normal
+full-disc range. Offline extraction still requires `redumper` for splitting,
+while
+offline layout display does not require `redumper`, `sg_raw`, or `cdparanoia`.
+File read errors, malformed TOCs, and reconciliation disagreements fail closed.
+
 `--retries` controls how many retries redumper performs for a problem area
 within one dump or refinement pass. `--refine-passes` controls how many
 additional passes this program may start. These are separate controls.

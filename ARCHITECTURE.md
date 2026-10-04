@@ -98,6 +98,12 @@ optional AccurateRip verification
 typed ExtractionResult
 ```
 
+With `--existing-dump`, the workspace adapter first copies the primary dump
+artifact set under the planned image name. The coordinator bypasses the
+acquisition service and proceeds directly to splitting. Split's write-offset
+mapping and the copied state file provide fail-closed SCSI/C2 inspection; the
+source dump is never opened for writing.
+
 AccurateRip runs after output commit. A verification lookup or checksum failure
 therefore cannot remove completed output. With per-track `--abort-on-skip`, the
 application commits every clean permitted output and then returns a nonzero CLI
@@ -123,7 +129,7 @@ protocol rather than introduce conditionals throughout the coordinator.
 `src/redumper_cdda/adapters/` contains concrete integrations:
 
 -   `subprocess_runner.py`: child-process execution and interruption cleanup;
--   `mmc.py` and `cdparanoia.py`: external layout readers;
+-   `mmc.py` and `cdparanoia.py`: live-command and file-backed layout readers;
 -   `layout_provider.py`: exact MMC/cdparanoia reconciliation, including the
     validated enhanced-CD session-lead-out exception;
 -   `redumper.py`: exact command construction, progress parsing, integrity
@@ -131,7 +137,8 @@ protocol rather than introduce conditionals throughout the coordinator.
 -   `cue.py`: CUE parsing, discovery, and audio/data source resolution;
 -   `wav.py` and `iso9660.py`: output-writer strategies;
 -   `accuraterip.py`: real and null verification strategies;
--   `workspace.py`: unique temporary-workspace lifecycle;
+-   `workspace.py`: unique temporary-workspace lifecycle and read-only source
+    dump staging;
 -   `console.py`: quiet, concise, and verbose reporters.
 
 Adapters translate external representations at their boundary and return typed

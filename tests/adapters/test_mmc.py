@@ -1,4 +1,6 @@
 import unittest
+import tempfile
+from pathlib import Path
 
 from redumper_cdda.adapters.mmc import MmcTocReader
 from redumper_cdda.domain.errors import LayoutError, TocParseError
@@ -101,6 +103,44 @@ class MmcTocReaderTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(LayoutError, "(?s)format 2 failed.*full failed"):
             reader.read("/dev/sr0")
+
+    def test_reads_binary_tocs_from_files_without_running_sg_raw(self):
+        with tempfile.TemporaryDirectory() as directory:
+            toc_path = Path(directory) / "disc.toc"
+            full_toc_path = Path(directory) / "disc.fulltoc"
+            toc_path.write_bytes(self.toc())
+            full_toc_path.write_bytes(self.full_toc())
+            runner = FakeRunner()
+            reporter = RecordingReporter()
+
+            layout = MmcTocReader(
+                runner, reporter, toc_path, full_toc_path
+            ).read("-")
+
+            self.assertEqual(layout.track(1).begin_lba, 150)
+            self.assertEqual(layout.track(1).end_lba, 225)
+            self.assertEqual(runner.calls, [])
+            self.assertIn("files", reporter.events[0].values)
+
+    def test_file_read_and_parse_failures_are_typed(self):
+        reader = MmcTocReader(
+            FakeRunner(), RecordingReporter(), Path("/missing/disc.toc"),
+            Path("/missing/disc.fulltoc"),
+        )
+        with self.assertRaisesRegex(LayoutError, "Could not read MMC") as caught:
+            reader.read("-")
+        self.assertIsInstance(caught.exception.__cause__, OSError)
+
+        with tempfile.TemporaryDirectory() as directory:
+            toc_path = Path(directory) / "disc.toc"
+            full_toc_path = Path(directory) / "disc.fulltoc"
+            toc_path.write_bytes(b"bad")
+            full_toc_path.write_bytes(self.full_toc())
+            reader = MmcTocReader(
+                FakeRunner(), RecordingReporter(), toc_path, full_toc_path
+            )
+            with self.assertRaisesRegex(TocParseError, "shorter than"):
+                reader.read("-")
 
 
 if __name__ == "__main__":

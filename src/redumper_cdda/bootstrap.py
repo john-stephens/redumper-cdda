@@ -1,6 +1,7 @@
 """Production composition root."""
 
 from functools import partial
+from pathlib import Path
 
 from .accuraterip import load_accuraterip_library, verify_with_accuraterip
 from .adapters.accuraterip import AccurateRipVerifier, NullVerifier
@@ -30,11 +31,21 @@ from .integrity import inspect_track_media_errors, parse_media_errors, parse_spl
 from .iso9660 import data_track_to_iso
 
 
-def create_application(reporter):
+def create_application(
+    reporter,
+    existing_dump=None,
+    cdparanoia_toc_file=None,
+):
     runner = SubprocessRunner()
+    mmc_toc_file = None
+    mmc_full_toc_file = None
+    if existing_dump is not None:
+        dump_prefix = Path(existing_dump)
+        mmc_toc_file = Path(f"{dump_prefix}.toc")
+        mmc_full_toc_file = Path(f"{dump_prefix}.fulltoc")
     layout_provider = ReconciledLayoutProvider(
-        MmcTocReader(runner, reporter),
-        CdparanoiaTocReader(runner, reporter),
+        MmcTocReader(runner, reporter, mmc_toc_file, mmc_full_toc_file),
+        CdparanoiaTocReader(runner, reporter, cdparanoia_toc_file),
     )
     redumper = RedumperClient(RedumperProcessExecutor(runner, reporter))
     integrity = RedumperIntegrityParser(parse_media_errors, parse_split_write_offsets)
