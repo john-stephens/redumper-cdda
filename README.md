@@ -156,6 +156,54 @@ while
 offline layout display does not require `redumper`, `sg_raw`, or `cdparanoia`.
 File read errors, malformed TOCs, and reconciliation disagreements fail closed.
 
+### Building the physical-test corpus
+
+`scripts/capture_physical_test_data.py` captures the media-dependent inputs
+for `PHYSICAL_TESTS.md`. Run it once for each disc profile while that disc is
+inserted:
+
+``` bash
+./scripts/capture_physical_test_data.py regular-audio /dev/sg4
+./scripts/capture_physical_test_data.py track0-pregap /dev/sg4
+./scripts/capture_physical_test_data.py data-first /dev/sg4
+./scripts/capture_physical_test_data.py data-last /dev/sg4
+./scripts/capture_physical_test_data.py data-only /dev/sg4
+./scripts/capture_physical_test_data.py audio-errors /dev/sg4 \
+  --clean-track=1 --error-track=2 --error-range=1-3
+```
+
+Each invocation first captures and reconciles the live MMC and cdparanoia
+layouts. It then performs all applicable redumper reads for that profile before
+the disc is changed. Dumps are scenario-sized: their LBA ranges match the
+selection in the physical test plan and include the required one-sector ending
+padding. Packaging variants that have the same physical range share one dump;
+invalid cases that must fail before acquisition do not create a dump. The
+script does not refine or split the captured data.
+
+The `audio-errors` profile requires a known-clean audio track, a known-damaged
+audio track, and a contiguous all-audio range containing both. It captures a
+clean control, the damaged track alone, and the mixed range. Its default is
+`--retries=0`, while the other profiles default to `--retries=100`. The script
+fails unless the clean control finishes at SCSI/C2 `0/0` and both damaged
+captures retain a nonzero SCSI or C2 count. This makes the resulting fixtures
+useful for deterministic offline error-policy tests. Override `--retries` when
+a particular physical test requires another initial-read policy.
+
+For the data-only profile, cdparanoia is deliberately not queried because the
+MMC layout contains no audio tracks; the saved TOC text records that fact and
+can still be supplied to the offline CLI, where it is not parsed.
+
+The resulting files are stored below `test_data/PROFILE/`. `manifest.json`
+records drive identity, tool/repository versions, commands, statuses, track
+layout, selected tracks, and exact logical and physical ranges.
+`SHA256SUMS` covers every retained file. A scenario's `existing_dump` field is
+the extensionless prefix to pass to `--existing-dump`; use the profile-level
+`cdparanoia-toc.txt` with `--cdparanoia-toc-file`.
+
+`test_data/` is ignored by Git because the dump payloads and derived audio or
+data can be copyrighted. The script refuses to overwrite an existing profile
+directory. Move or remove a previous capture explicitly before rebuilding it.
+
 `--retries` controls how many retries redumper performs for a problem area
 within one dump or refinement pass. `--refine-passes` controls how many
 additional passes this program may start. These are separate controls.
