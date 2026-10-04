@@ -83,10 +83,12 @@ changes it.
 
 When data output is requested, splitting also uses `--filesystem-trim`. The
 selected data BIN begins at its CUE `INDEX 01`, excluding its INDEX 00 pregap.
-Raw `MODE1/2352` sectors are reduced to their 2048-byte user payload;
-`MODE2/2352` is accepted only for Form 1 sectors, and `MODE1/2048` is copied
-directly. MODE0, Mode 2 Form 2, malformed sectors, and unknown modes fail
-closed.
+Raw `MODE1/2352` sectors are reduced to their 2048-byte user payload, and
+`MODE1/2048` is copied directly. For both Form 1 and Form 2 `MODE2/2352`
+sectors, the first 2048 bytes of user data become the ISO logical block. This
+supports enhanced CDs whose ISO9660 volume contains mixed Mode 2 forms; the
+redumper dump remains the lossless source for the additional 276 Form 2
+bytes. MODE0, malformed sectors, and unknown modes fail closed.
 
 The converted file must contain a valid ISO9660 primary volume descriptor,
 matching little- and big-endian volume sizes, and a 2048-byte logical block

@@ -174,14 +174,15 @@ When any selected output is data, pass `--filesystem-trim` to the one
 follows:
 
 ``` text
-MODE1/2352        bytes 16..2064 -> 2048-byte ISO sector
-MODE2/2352 Form 1 bytes 24..2072 -> 2048-byte ISO sector
-MODE1/2048        copy directly
+MODE1/2352                  bytes 16..2064 -> 2048-byte ISO sector
+MODE2/2352 Form 1 or Form 2 bytes 24..2072 -> 2048-byte ISO sector
+MODE1/2048                  copy directly
 ```
 
-Validate raw sync, mode bytes, duplicated Mode 2 subheaders, and the Form 1
-bit. Fail closed for MODE0, Mode 2 Form 2, mixed forms, malformed sectors, or
-unknown modes.
+Validate raw sync, mode bytes, and duplicated Mode 2 subheaders. Mixed Form 1
+and Form 2 sectors are valid; the ISO retains the first 2048 user-data bytes
+from each sector while the redumper dump remains the lossless source. Fail
+closed for MODE0, malformed sectors, or unknown modes.
 
 Require a valid ISO9660 primary volume descriptor. Its little- and big-endian
 volume-space sizes must agree, its logical block size must be 2048, and its
@@ -492,8 +493,8 @@ Prefer unit tests for pure parsing/range functions. Cover:
 -   mixed default naming uses `trackNN.wav` and `trackNN.iso`;
 -   custom prefixes apply to automatically named WAV and ISO output;
 -   data CUE parsing starts at INDEX 01;
--   MODE1/2352 and MODE2/2352 Form 1 payload extraction;
--   Mode 2 Form 2 and unsupported modes fail closed;
+-   MODE1/2352 and MODE2/2352 Form 1/Form 2 payload extraction;
+-   mixed Mode 2 forms and unsupported modes;
 -   ISO9660 primary-volume validation and exact filesystem trimming;
 -   mixed separate output still uses one dump, refine range, and split;
 -   mixed-output failure removes the entire output set;

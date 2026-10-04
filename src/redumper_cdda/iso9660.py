@@ -31,12 +31,11 @@ def extract_iso_payload(raw_sector, track_type):
         if raw_sector[16:20] != raw_sector[20:24]:
             raise RuntimeError("MODE2/2352 sector has mismatched subheaders.")
 
-        if raw_sector[18] & 0x20:
-            raise RuntimeError(
-                "MODE2 Form 2 sectors cannot be represented in "
-                "a 2048-byte-sector ISO."
-            )
-
+        # A 2048-byte ISO image is the logical-block view of the data track.
+        # Form 2 sectors carry 2324 user-data bytes, but enhanced CDs can mix
+        # them into an otherwise ISO9660 track.  Retain the first logical
+        # block, as established CD image converters do; the staged redumper
+        # dump remains the lossless source for all 2324 bytes.
         return raw_sector[24:24 + ISO_SECTOR_SIZE]
 
     raise RuntimeError(f"Unsupported data-track mode {track_type}.")
