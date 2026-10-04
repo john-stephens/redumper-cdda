@@ -223,13 +223,17 @@ mixed single-file requests fail, clean tracks match across applicable captured
 ranges after accounting for redumper's reported disc write offset, and captured
 SCSI/C2 fixtures obey both default and strict policies. Audio parity still
 requires every shared PCM frame to match exactly; data parity requires an
-exact whole-file hash match.
+exact whole-file hash match. Every error-free scenario containing numbered
+audio tracks must also verify every such track against AccurateRip. Track 0,
+data-only scenarios, and captures intentionally containing media errors are
+excluded from that requirement.
 
 Generated WAVs and ISOs use a temporary directory and are removed after the
 run. To inspect them, provide a new path with `--keep-work=PATH`. Restrict a
 run by repeating `--profile=NAME`; use `--skip-source-hashes` only for a faster
-diagnostic run. No optical device, `sg_raw`, or cdparanoia is used, although
-redumper remains required for offline splitting.
+diagnostic run. No optical device, `sg_raw`, or cdparanoia is used. Redumper
+remains required for offline splitting, ARver must be installed, and the
+AccurateRip checks require network access.
 
 `--retries` controls how many retries redumper performs for a problem area
 within one dump or refinement pass. `--refine-passes` controls how many

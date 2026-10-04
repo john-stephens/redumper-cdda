@@ -227,6 +227,7 @@ def extraction_command(
     single_file=False,
     abort_on_skip=False,
     show_layout=False,
+    accuraterip=False,
 ):
     prefix = safe_child(
         profile_dir, scenario["existing_dump"], "existing dump"
@@ -243,9 +244,10 @@ def extraction_command(
         [
             f"--existing-dump={prefix}",
             f"--cdparanoia-toc-file={toc}",
-            "--no-accuraterip",
         ]
     )
+    if not accuraterip:
+        command.append("--no-accuraterip")
     if scenario.get("include_data"):
         command.append("--include-data")
     if single_file:
@@ -286,6 +288,48 @@ def assert_offline_log(log_path):
     if len(splits) != 1:
         raise ValidationError(
             f"offline extraction expected one split, found {len(splits)}: {log_path}"
+        )
+
+
+def expected_accuraterip_tracks(manifest, scenario):
+    if scenario.get("expected_media_errors", False):
+        return ()
+    return tuple(
+        number
+        for number in scenario["selected_tracks"]
+        if number != 0 and selected_track(manifest, number)["kind"] == "audio"
+    )
+
+
+def assert_accuraterip(log_path, expected_tracks):
+    if not expected_tracks:
+        return
+    try:
+        output = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise ValidationError(f"could not read extraction log {log_path}: {exc}") from exc
+    results = {
+        int(number): status
+        for number, status in re.findall(
+            r"^Track (\d+): (verified|not present in the database|no match)\b",
+            output,
+            re.MULTILINE,
+        )
+    }
+    expected = set(expected_tracks)
+    if set(results) != expected:
+        raise ValidationError(
+            f"AccurateRip results differ in {log_path}: "
+            f"expected Tracks {sorted(expected)}, got {sorted(results)}"
+        )
+    failed = sorted(
+        number for number, status in results.items() if status != "verified"
+    )
+    if failed:
+        label = "Track" if len(failed) == 1 else "Tracks"
+        raise ValidationError(
+            f"AccurateRip did not verify {label} "
+            + ", ".join(f"{number:02d}" for number in failed)
         )
 
 
@@ -493,11 +537,17 @@ def validate_scenario(launcher, profile_dir, manifest, scenario, workdir):
     scenario_dir = workdir / scenario["name"]
     separate_dir = scenario_dir / "separate"
     separate_dir.mkdir(parents=True)
+    accuraterip_tracks = expected_accuraterip_tracks(manifest, scenario)
     command = extraction_command(
-        launcher, profile_dir, scenario, separate_dir
+        launcher,
+        profile_dir,
+        scenario,
+        separate_dir,
+        accuraterip=bool(accuraterip_tracks),
     )
     run_command(command, separate_dir, expect_success=True)
     assert_offline_log(separate_dir / "validation.log")
+    assert_accuraterip(separate_dir / "validation.log", accuraterip_tracks)
     expected = expected_outputs(manifest, scenario, separate_dir)
     separate_hashes = validate_output_set(expected)
 
@@ -507,10 +557,16 @@ def validate_scenario(launcher, profile_dir, manifest, scenario, workdir):
         single_dir = scenario_dir / "single"
         single_dir.mkdir()
         command = extraction_command(
-            launcher, profile_dir, scenario, single_dir, single_file=True
+            launcher,
+            profile_dir,
+            scenario,
+            single_dir,
+            single_file=True,
+            accuraterip=bool(accuraterip_tracks),
         )
         run_command(command, single_dir, expect_success=True)
         assert_offline_log(single_dir / "validation.log")
+        assert_accuraterip(single_dir / "validation.log", accuraterip_tracks)
         single_expected = expected_outputs(
             manifest, scenario, single_dir, single_file=True
         )
@@ -524,10 +580,16 @@ def validate_scenario(launcher, profile_dir, manifest, scenario, workdir):
         single_dir = scenario_dir / "single-data"
         single_dir.mkdir()
         command = extraction_command(
-            launcher, profile_dir, scenario, single_dir, single_file=True
+            launcher,
+            profile_dir,
+            scenario,
+            single_dir,
+            single_file=True,
+            accuraterip=bool(accuraterip_tracks),
         )
         run_command(command, single_dir, expect_success=True)
         assert_offline_log(single_dir / "validation.log")
+        assert_accuraterip(single_dir / "validation.log", accuraterip_tracks)
         single_hashes = validate_output_set(
             expected_outputs(manifest, scenario, single_dir, single_file=True)
         )

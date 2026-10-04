@@ -100,6 +100,16 @@ class ValidatePhysicalTestDataTests(unittest.TestCase):
             self.assertEqual(command[1], "1")
             self.assertIn("--no-accuraterip", command)
             self.assertNotIn("--include-data", command)
+            self.assertNotIn(
+                "--no-accuraterip",
+                validate.extraction_command(
+                    Path("/tool"),
+                    profile,
+                    manifest["scenarios"][0],
+                    output,
+                    accuraterip=True,
+                ),
+            )
 
             with self.assertRaisesRegex(validate.ValidationError, "not found"):
                 validate.load_manifests(root, ["absent"])
@@ -223,6 +233,44 @@ class ValidatePhysicalTestDataTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(validate.ValidationError, "acquisition"):
                 validate.assert_offline_log(log)
+
+    def test_accuraterip_requirements_are_manifest_driven_and_fail_closed(self):
+        manifest = synthetic_manifest()
+        scenario = manifest["scenarios"][0]
+        self.assertEqual(
+            validate.expected_accuraterip_tracks(manifest, scenario),
+            (1,),
+        )
+        self.assertEqual(
+            validate.expected_accuraterip_tracks(
+                manifest,
+                dict(scenario, selected_tracks=[0, 2]),
+            ),
+            (),
+        )
+        self.assertEqual(
+            validate.expected_accuraterip_tracks(
+                manifest,
+                dict(scenario, expected_media_errors=True),
+            ),
+            (),
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "validation.log"
+            log.write_text(
+                "Track 01: verified (ARv2 12345678, confidence 4)\n",
+                encoding="utf-8",
+            )
+            validate.assert_accuraterip(log, (1,))
+            log.write_text(
+                "Track 01: no match (ARv1 1, ARv2 2)\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(validate.ValidationError, "did not verify"):
+                validate.assert_accuraterip(log, (1,))
+            with self.assertRaisesRegex(validate.ValidationError, "results differ"):
+                validate.assert_accuraterip(log, (1, 2))
 
 
 if __name__ == "__main__":
