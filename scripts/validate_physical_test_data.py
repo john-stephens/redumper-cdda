@@ -197,6 +197,7 @@ def selected_track(manifest, number):
         return {
             "number": 0,
             "kind": "audio",
+            "begin_lba": 0,
             "length_sectors": track_one["begin_lba"],
         }
     track = next(

@@ -106,7 +106,9 @@ class ValidatePhysicalTestDataTests(unittest.TestCase):
 
     def test_track_models_and_expected_output_names_are_manifest_driven(self):
         manifest = synthetic_manifest()
-        self.assertEqual(validate.selected_track(manifest, 0)["length_sectors"], 10)
+        track_zero = validate.selected_track(manifest, 0)
+        self.assertEqual(track_zero["begin_lba"], 0)
+        self.assertEqual(track_zero["length_sectors"], 10)
         self.assertEqual(validate.selected_track(manifest, 2)["kind"], "data")
         with self.assertRaises(validate.ValidationError):
             validate.selected_track(manifest, 9)
