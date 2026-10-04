@@ -6,7 +6,7 @@ conditions and layouts:
 1. regular audio CD;
 2. audio CD with a Track 1 pregap containing hidden Track 0 audio;
 3. audio CD with a data track first;
-4. audio CD with a data track last; and
+4. audio CD with a data track last;
 5. data-only CD; and
 6. audio CD with a known-clean track and a track with repeatable SCSI or C2
    errors.
@@ -46,6 +46,16 @@ contains both. The profile uses zero retries by default and rejects captures
 unless the control is clean and both damaged scenarios retain SCSI or C2
 errors.
 
+After all profiles have been captured, run every media-free case with:
+
+``` bash
+./scripts/validate_physical_test_data.py
+```
+
+The validator reads only the capture manifests and dump files, creates outputs
+in temporary storage, and rechecks every source hash afterward. It requires
+redumper for splitting but does not require or access an optical device.
+
 ## Test records and common validation
 
 For every run, retain:
@@ -55,7 +65,7 @@ For every run, retain:
 -   the file written by `--log-file`;
 -   SHA-256 hashes of every resulting WAV and ISO;
 -   the redumper and `redumper-cdda` versions;
--   the optical-drive model and firmware revision; and
+-   the optical-drive model and firmware revision.
 
 Use a separate output directory for each case. Unless a case deliberately
 tests failure cleanup, begin with no output files at the requested final

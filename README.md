@@ -204,6 +204,30 @@ the extensionless prefix to pass to `--existing-dump`; use the profile-level
 data can be copyrighted. The script refuses to overwrite an existing profile
 directory. Move or remove a previous capture explicitly before rebuilding it.
 
+### Validating captured data without media
+
+After capture, run the complete media-free validation suite with:
+
+``` bash
+./scripts/validate_physical_test_data.py
+```
+
+The validator discovers profiles and scenarios from their `manifest.json`
+files; it does not encode particular discs, track counts, or captured paths.
+It verifies `SHA256SUMS` before and after the run, displays every stored layout,
+and extracts every scenario through `--existing-dump` and
+`--cdparanoia-toc-file`. It confirms that no dump or refine command ran, each
+scenario split exactly once, WAV sector counts and formats are exact, ISO9660
+outputs are exactly trimmed, single-file packaging matches separate output,
+mixed single-file requests fail, clean tracks match across applicable captured
+ranges, and captured SCSI/C2 fixtures obey both default and strict policies.
+
+Generated WAVs and ISOs use a temporary directory and are removed after the
+run. To inspect them, provide a new path with `--keep-work=PATH`. Restrict a
+run by repeating `--profile=NAME`; use `--skip-source-hashes` only for a faster
+diagnostic run. No optical device, `sg_raw`, or cdparanoia is used, although
+redumper remains required for offline splitting.
+
 `--retries` controls how many retries redumper performs for a problem area
 within one dump or refinement pass. `--refine-passes` controls how many
 additional passes this program may start. These are separate controls.
