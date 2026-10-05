@@ -29,6 +29,8 @@ class WorkspaceTests(unittest.TestCase):
             (workspace.path / "folder").mkdir()
             file_path = workspace.path / "file"
             file_path.write_text("x")
+            self.assertEqual(set(workspace.snapshot()), {file_path.resolve()})
+            self.assertEqual(workspace.changed_files({}), [file_path])
             with mock.patch.object(Path, "stat", side_effect=OSError):
                 self.assertEqual(workspace.snapshot(), {})
                 self.assertEqual(workspace.changed_files({}), [])

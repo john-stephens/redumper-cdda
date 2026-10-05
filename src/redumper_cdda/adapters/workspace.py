@@ -35,24 +35,25 @@ class Workspace:
     def snapshot(self):
         result = {}
         for path in self.path.iterdir():
-            if not path.is_file():
-                continue
             try:
                 stat = path.stat()
+                resolved = path.resolve()
             except OSError:
                 continue
-            result[path.resolve()] = (stat.st_size, stat.st_mtime_ns)
+            if not stat_module.S_ISREG(stat.st_mode):
+                continue
+            result[resolved] = (stat.st_size, stat.st_mtime_ns)
         return result
 
     def changed_files(self, before):
         result = []
         for path in self.path.iterdir():
-            if not path.is_file():
-                continue
-            resolved = path.resolve()
             try:
                 stat = path.stat()
+                resolved = path.resolve()
             except OSError:
+                continue
+            if not stat_module.S_ISREG(stat.st_mode):
                 continue
             current = (stat.st_size, stat.st_mtime_ns)
             if resolved not in before or before[resolved] != current:
