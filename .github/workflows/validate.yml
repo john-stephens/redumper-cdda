@@ -1,9 +1,10 @@
-name: Publish to PyPI
+name: Validate
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - "**"
+  pull_request:
 
 permissions:
   contents: read
@@ -64,32 +65,3 @@ jobs:
 
       - name: Validate distribution metadata
         run: python -m twine check --strict dist/*
-
-      - name: Upload distribution artifacts
-        uses: actions/upload-artifact@v5
-        with:
-          name: python-package-distributions
-          path: dist/
-          if-no-files-found: error
-          retention-days: 7
-
-  publish:
-    name: Publish distribution to PyPI
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: pypi
-      url: https://pypi.org/p/redumper-cdda
-    permissions:
-      contents: read
-      id-token: write
-
-    steps:
-      - name: Download distribution artifacts
-        uses: actions/download-artifact@v6
-        with:
-          name: python-package-distributions
-          path: dist/
-
-      - name: Publish distribution to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
