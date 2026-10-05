@@ -13,6 +13,12 @@ class AccurateRipVerifier(Verifier):
         self._verifier = verifier
 
     def prepare(self, plan):
+        if not any(
+            track.kind is TrackKind.AUDIO and track.number != 0
+            for track in plan.selection.tracks
+        ):
+            self.enabled = False
+            return
         disc = self._serialize_layout(plan.disc)
         from ..accuraterip import accuraterip_layout_type
 
@@ -20,14 +26,6 @@ class AccurateRipVerifier(Verifier):
             accuraterip_layout_type(disc)
         except RuntimeError as exc:
             raise VerificationError(str(exc)) from exc
-        if not any(
-            track.kind is TrackKind.AUDIO and track.number != 0
-            for track in plan.selection.tracks
-        ):
-            raise VerificationError(
-                "The selection contains no AccurateRip-verifiable audio tracks; "
-                "Track 0 and data tracks are not tracked."
-            )
 
     def verify(self, plan, split_result, workdir):
         verification = [

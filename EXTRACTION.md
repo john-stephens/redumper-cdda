@@ -233,7 +233,8 @@ another redumper dump or split.
 ARv2 matches are preferred, with ARv1 used as a fallback. Report the matching
 version, checksum, and database confidence for each selected audio track.
 Track 0 and data tracks are not represented in AccurateRip and are not
-checksummed.
+checksummed. When a selection contains no numbered audio tracks, AccurateRip
+is skipped automatically and data extraction continues normally.
 
 AccurateRip is independent corroboration, not a replacement for redumper's
 SCSI/C2 status. A database miss, lookup failure, or checksum mismatch must not

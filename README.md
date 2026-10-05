@@ -397,7 +397,9 @@ AccurateRip verification uses the complete MMC disc layout to identify the
 pressing even when only part of the disc is selected. Track 0 and data tracks
 are not tracked by AccurateRip. A database miss, network failure, or checksum
 mismatch does not delete completed output, and AccurateRip results do not
-replace the separate redumper SCSI/C2 integrity status.
+replace the separate redumper SCSI/C2 integrity status. A data-only selection
+is extracted normally and automatically skips AccurateRip; it does not require
+an audio track or `--no-accuraterip`.
 
 Use `--no-accuraterip` to disable AccurateRip verification even when ARver is
 installed:

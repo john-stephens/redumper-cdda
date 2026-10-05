@@ -39,13 +39,15 @@ class AccurateRipVerifierTests(unittest.TestCase):
 
     def test_translates_layout_selection_and_lookup_failures(self):
         data = Track(1, TrackKind.DATA, 4, 0, 10)
-        with self.assertRaisesRegex(VerificationError, "at least one audio"):
-            self.verifier(lambda *_args: None).prepare(self.plan([data]))
-
         audio = Track(2, TrackKind.AUDIO, 0, 10, 20)
-        with self.assertRaisesRegex(VerificationError, "no AccurateRip-verifiable"):
+        data_verifier = self.verifier(lambda *_args: None)
+        data_verifier.prepare(self.plan([data, audio], selected=[data]))
+        self.assertFalse(data_verifier.enabled)
+
+        trailing_audio = Track(3, TrackKind.AUDIO, 0, 20, 30)
+        with self.assertRaisesRegex(VerificationError, "does not support"):
             self.verifier(lambda *_args: None).prepare(
-                self.plan([data, audio], selected=[data])
+                self.plan([audio, data, trailing_audio], selected=[audio])
             )
 
         plan = self.plan([audio])
