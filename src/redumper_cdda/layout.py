@@ -65,17 +65,16 @@ def parse_mmc_toc(data):
             leadout_lba = start_lba
             continue
 
-        if not first_track <= track_number <= last_track:
-            continue
-        if track_number in descriptors:
-            raise RuntimeError(
-                "MMC READ TOC response contains duplicate "
-                f"Track {track_number}."
-            )
-        descriptors[track_number] = {
-            "control": control,
-            "begin": start_lba,
-        }
+        if first_track <= track_number <= last_track:
+            if track_number in descriptors:
+                raise RuntimeError(
+                    "MMC READ TOC response contains duplicate "
+                    f"Track {track_number}."
+                )
+            descriptors[track_number] = {
+                "control": control,
+                "begin": start_lba,
+            }
 
     expected_numbers = list(range(first_track, last_track + 1))
     missing_numbers = [
