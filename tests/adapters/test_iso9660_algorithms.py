@@ -135,6 +135,9 @@ class Iso9660CoverageTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Short.*path"):
             self.module._rebase_path_table(io.BytesIO(), 0, 1, "little", 10, 20)
         self.module._rebase_path_table(io.BytesIO(), 0, 0, "little", 10, 20)
+        padded = io.BytesIO(b"\0\0")
+        self.module._rebase_path_table(padded, 0, 2, "little", 10, 20)
+        self.assertEqual(padded.getvalue(), b"\0\0")
         with self.assertRaisesRegex(RuntimeError, "Malformed.*path"):
             self.module._rebase_path_table(
                 io.BytesIO(b"\0x"), 0, 2, "little", 10, 20
