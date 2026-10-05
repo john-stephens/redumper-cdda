@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 import tempfile
 import unittest
@@ -114,6 +115,11 @@ class ValidatePhysicalTestDataTests(unittest.TestCase):
             with self.assertRaisesRegex(validate.ValidationError, "not found"):
                 validate.load_manifests(root, ["absent"])
 
+            arguments = validate.parser().parse_args(
+                ["--log-file", str(root / "validation.log")]
+            )
+            self.assertEqual(arguments.log_file, root / "validation.log")
+
             project_python = root / "project-python"
             project_python.touch()
             with mock.patch.object(validate, "PROJECT_PYTHON", project_python):
@@ -226,6 +232,26 @@ class ValidatePhysicalTestDataTests(unittest.TestCase):
             self.assertIs(
                 validate.run_command(["tool"], Path("/tmp"), True), success
             )
+        with tempfile.TemporaryDirectory() as directory:
+            detail = Path(directory) / "detail.log"
+            detail.write_text("verbose detail\n", encoding="utf-8")
+            stream = io.StringIO()
+            validation_log = validate.ValidationLog(stream)
+            validation_log.start_test("[synthetic] example")
+            with mock.patch.object(validate.subprocess, "run", return_value=success):
+                validate.run_command(
+                    ["tool", f"--log-file={detail}"],
+                    Path(directory),
+                    True,
+                    validation_log,
+                )
+            rendered = stream.getvalue()
+            self.assertIn("=" * 80, rendered)
+            self.assertIn("TEST: [synthetic] example", rendered)
+            self.assertIn(f"Working directory: {directory}", rendered)
+            self.assertIn("Exit status: 0", rendered)
+            self.assertIn("Captured output", rendered)
+            self.assertIn("verbose detail", rendered)
         failure = SimpleNamespace(returncode=2, stdout="failed")
         with mock.patch.object(validate.subprocess, "run", return_value=failure):
             with self.assertRaisesRegex(validate.ValidationError, "expected success"):

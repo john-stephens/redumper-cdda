@@ -46,6 +46,41 @@ class ParityOutput:
     write_offset: int = 0
 
 
+class ValidationLog:
+    def __init__(self, stream):
+        self._stream = stream
+
+    def start_test(self, name):
+        separator = "=" * 80
+        self._stream.write(f"\n{separator}\nTEST: {name}\n{separator}\n")
+        self._stream.flush()
+
+    def record(self, command, cwd, result):
+        self._stream.write(f"\nWorking directory: {cwd}\n")
+        self._stream.write("Command: " + " ".join(str(item) for item in command) + "\n")
+        self._stream.write(f"Exit status: {result.returncode}\n")
+        if result.stdout:
+            self._stream.write("\nCaptured output\n---------------\n")
+            self._stream.write(result.stdout)
+            if not result.stdout.endswith("\n"):
+                self._stream.write("\n")
+        detail_path = next(
+            (
+                Path(argument.split("=", 1)[1])
+                for argument in command
+                if str(argument).startswith("--log-file=")
+            ),
+            None,
+        )
+        if detail_path is not None and detail_path.is_file():
+            self._stream.write("\nVerbose application log\n-----------------------\n")
+            self._stream.write(
+                detail_path.read_text(encoding="utf-8", errors="replace")
+            )
+            self._stream.write("\n")
+        self._stream.flush()
+
+
 def parser():
     result = argparse.ArgumentParser(
         description=(
@@ -80,6 +115,12 @@ def parser():
         "--skip-source-hashes",
         action="store_true",
         help="skip the before/after SHA256SUMS checks",
+    )
+    result.add_argument(
+        "--log-file",
+        type=Path,
+        metavar="PATH",
+        help="write consolidated commands and verbose extraction output to PATH",
     )
     return result
 
@@ -268,7 +309,7 @@ def launcher_command(launcher):
     return [str(launcher)]
 
 
-def run_command(command, cwd, expect_success):
+def run_command(command, cwd, expect_success, validation_log=None):
     result = subprocess.run(
         command,
         cwd=cwd,
@@ -276,6 +317,8 @@ def run_command(command, cwd, expect_success):
         stderr=subprocess.STDOUT,
         text=True,
     )
+    if validation_log is not None:
+        validation_log.record(command, cwd, result)
     if (result.returncode == 0) != expect_success:
         tail = "\n".join(result.stdout.splitlines()[-30:])
         expectation = "success" if expect_success else "failure"
@@ -545,7 +588,9 @@ def clean_tracks(manifest):
     }
 
 
-def validate_scenario(launcher, profile_dir, manifest, scenario, workdir):
+def validate_scenario(
+    launcher, profile_dir, manifest, scenario, workdir, validation_log=None
+):
     scenario_dir = workdir / scenario["name"]
     separate_dir = scenario_dir / "separate"
     separate_dir.mkdir(parents=True)
@@ -557,7 +602,7 @@ def validate_scenario(launcher, profile_dir, manifest, scenario, workdir):
         separate_dir,
         accuraterip=bool(accuraterip_tracks),
     )
-    run_command(command, separate_dir, expect_success=True)
+    run_command(command, separate_dir, expect_success=True, validation_log=validation_log)
     assert_offline_log(separate_dir / "validation.log")
     assert_accuraterip(separate_dir / "validation.log", accuraterip_tracks)
     expected = expected_outputs(manifest, scenario, separate_dir)
@@ -576,7 +621,7 @@ def validate_scenario(launcher, profile_dir, manifest, scenario, workdir):
             single_file=True,
             accuraterip=bool(accuraterip_tracks),
         )
-        run_command(command, single_dir, expect_success=True)
+        run_command(command, single_dir, expect_success=True, validation_log=validation_log)
         assert_offline_log(single_dir / "validation.log")
         assert_accuraterip(single_dir / "validation.log", accuraterip_tracks)
         single_expected = expected_outputs(
@@ -599,7 +644,7 @@ def validate_scenario(launcher, profile_dir, manifest, scenario, workdir):
             single_file=True,
             accuraterip=bool(accuraterip_tracks),
         )
-        run_command(command, single_dir, expect_success=True)
+        run_command(command, single_dir, expect_success=True, validation_log=validation_log)
         assert_offline_log(single_dir / "validation.log")
         assert_accuraterip(single_dir / "validation.log", accuraterip_tracks)
         single_hashes = validate_output_set(
@@ -615,7 +660,7 @@ def validate_scenario(launcher, profile_dir, manifest, scenario, workdir):
         command = extraction_command(
             launcher, profile_dir, scenario, invalid_dir, single_file=True
         )
-        run_command(command, invalid_dir, expect_success=False)
+        run_command(command, invalid_dir, expect_success=False, validation_log=validation_log)
         if list(invalid_dir.glob("*.wav")) or list(invalid_dir.glob("*.iso")):
             raise ValidationError(
                 f"invalid mixed single-file mode created output: {scenario['name']}"
@@ -627,7 +672,7 @@ def validate_scenario(launcher, profile_dir, manifest, scenario, workdir):
         command = extraction_command(
             launcher, profile_dir, scenario, strict_dir, abort_on_skip=True
         )
-        run_command(command, strict_dir, expect_success=False)
+        run_command(command, strict_dir, expect_success=False, validation_log=validation_log)
         actual = set(strict_dir.glob("*.wav")) | set(strict_dir.glob("*.iso"))
         all_paths = {item[0].name for item in expected}
         actual_names = {path.name for path in actual}
@@ -656,7 +701,12 @@ def validate_scenario(launcher, profile_dir, manifest, scenario, workdir):
                 single_file=True,
                 abort_on_skip=True,
             )
-            run_command(command, strict_single_dir, expect_success=False)
+            run_command(
+                command,
+                strict_single_dir,
+                expect_success=False,
+                validation_log=validation_log,
+            )
             if list(strict_single_dir.glob("*.wav")):
                 raise ValidationError(
                     f"strict combined mode created output: {scenario['name']}"
@@ -682,7 +732,20 @@ def work_directory(keep_work):
     yield path
 
 
-def validate(args):
+@contextmanager
+def validation_log_file(path):
+    if path is None:
+        yield None
+        return
+    path = path.resolve()
+    try:
+        with path.open("w", encoding="utf-8") as stream:
+            yield ValidationLog(stream)
+    except OSError as exc:
+        raise ValidationError(f"could not write validation log {path}: {exc}") from exc
+
+
+def validate(args, validation_log=None):
     launcher = args.launcher.resolve()
     if not launcher.is_file() or not launcher.stat().st_mode & 0o111:
         raise ValidationError(f"launcher is not executable: {launcher}")
@@ -700,6 +763,8 @@ def validate(args):
         for profile_dir, manifest in manifests:
             profile = manifest["profile"]
             print(f"\n[{profile}] layout", flush=True)
+            if validation_log is not None:
+                validation_log.start_test(f"[{profile}] layout")
             layout_dir = workdir / profile / "layout"
             layout_dir.mkdir(parents=True)
             layout_scenario = manifest["scenarios"][0]
@@ -710,7 +775,12 @@ def validate(args):
                 layout_dir,
                 show_layout=True,
             )
-            layout = run_command(command, layout_dir, expect_success=True).stdout
+            layout = run_command(
+                command,
+                layout_dir,
+                expect_success=True,
+                validation_log=validation_log,
+            ).stdout
             for track in manifest["layout"]["tracks"]:
                 pattern = rf"^\s*{track['number']}\s+{track['kind']}\s+"
                 if not re.search(pattern, layout, re.MULTILINE):
@@ -720,12 +790,15 @@ def validate(args):
 
             for scenario in manifest["scenarios"]:
                 print(f"[{profile}] {scenario['name']}", flush=True)
+                if validation_log is not None:
+                    validation_log.start_test(f"[{profile}] {scenario['name']}")
                 outputs = validate_scenario(
                     launcher,
                     profile_dir,
                     manifest,
                     scenario,
                     workdir / profile,
+                    validation_log,
                 )
                 if not scenario.get("expected_media_errors", False):
                     for number, output in outputs.items():
@@ -751,7 +824,8 @@ def validate(args):
 def main(argv=None):
     args = parser().parse_args(argv)
     try:
-        validate(args)
+        with validation_log_file(args.log_file) as validation_log:
+            validate(args, validation_log)
     except ValidationError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1

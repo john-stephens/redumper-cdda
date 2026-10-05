@@ -237,6 +237,15 @@ AccurateRip checks require network access. When the default repository launcher
 is used, the validator runs it with `.venv/bin/python` if that interpreter
 exists; otherwise it uses the validator's current Python interpreter.
 
+Use `--log-file=PATH` to retain a consolidated diagnostic log. A prominent
+named header separates each test, followed by its commands, working
+directories, exit statuses, captured output, and the verbose application logs
+that would otherwise be removed with the temporary validation workspace:
+
+``` bash
+./scripts/validate_physical_test_data.py --log-file=validation.log
+```
+
 `--retries` controls how many retries redumper performs for a problem area
 within one dump or refinement pass. `--refine-passes` controls how many
 additional passes this program may start. These are separate controls.
