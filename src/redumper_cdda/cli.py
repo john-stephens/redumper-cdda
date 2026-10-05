@@ -195,7 +195,7 @@ class CliApplication:
 
     def execute(self, argv=None):
         parser = self._parser_factory().create()
-        args = parser.parse_args(argv)
+        args = parser.parse_intermixed_args(argv)
         self._resolve_offline_positionals(args)
         self._validate(parser, args)
         self._dependency_checker.check(
