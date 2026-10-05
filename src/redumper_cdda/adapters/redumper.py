@@ -44,6 +44,8 @@ class RedumperCommandFactory:
             f"--image-name={self.image_name}",
             "--force-split",
         ]
+        if not include_data:
+            command.append("--force-offset=0")
         if include_data:
             command.append("--filesystem-trim")
         return command

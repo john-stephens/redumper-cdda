@@ -61,10 +61,16 @@ output.
 
 After the SCSI/C2 state is determined and the configured error policy is
 applied, the intentionally partial image is split with
-`redumper split --force-split`. The generated CUE is used to locate the
-selected track's file-relative INDEX 01. The script starts there, then
-consumes subsequent AUDIO BINs from sector zero until exactly
-`cdparanoia`'s reported track length has been collected.
+`redumper split --force-split`. Audio-only selections also use
+`--force-offset=0`. Without it, redumper can mistake a bounded partial range's
+endpoint for the physical disc lead-out and apply a selection-dependent write
+offset; a captured single-track case applied `+540` and failed AccurateRip
+while the same track from the full range verified at offset zero. Selections
+containing data retain automatic offset detection because redumper uses it to
+identify the data-sector mode. The generated CUE is used to locate the selected
+track's file-relative INDEX 01. The script starts there, then consumes
+subsequent AUDIO BINs from sector zero until exactly `cdparanoia`'s reported
+track length has been collected.
 
 When `--existing-dump=PATH` is supplied, `PATH` is the redumper image prefix
 without an extension. Primary dump artifacts are copied and renamed inside the

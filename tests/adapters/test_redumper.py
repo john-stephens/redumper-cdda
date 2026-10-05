@@ -33,7 +33,7 @@ class RedumperCommandFactoryTests(unittest.TestCase):
             "redumper", "split", "--image-path=/work",
             "--image-name=track02", "--force-split",
         ]
-        self.assertEqual(factory.split(), split)
+        self.assertEqual(factory.split(), split + ["--force-offset=0"])
         self.assertEqual(factory.split(include_data=True), split + ["--filesystem-trim"])
 
     def test_state_inspector_translates_failures(self):

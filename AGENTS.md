@@ -397,6 +397,12 @@ Once SCSI/C2 status has been independently determined and the selected
 error policy allows extraction, `redumper split --force-split` may be
 used because the image is intentionally incomplete.
 
+Add `--force-offset=0` when the selection contains only audio. This prevents
+redumper from treating a bounded partial endpoint as the physical lead-out and
+applying a selection-dependent write offset. Do not force the offset when any
+selected output is data because redumper's automatic offset detection is also
+needed to identify the data-sector mode.
+
 `--force-split` is a representation/extraction step, not an integrity
 check.
 
