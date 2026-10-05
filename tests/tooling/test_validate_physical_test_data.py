@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 import wave
+from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -236,22 +237,40 @@ class ValidatePhysicalTestDataTests(unittest.TestCase):
             detail = Path(directory) / "detail.log"
             detail.write_text("verbose detail\n", encoding="utf-8")
             stream = io.StringIO()
+            console = io.StringIO()
             validation_log = validate.ValidationLog(stream)
-            validation_log.start_test("[synthetic] example")
-            with mock.patch.object(validate.subprocess, "run", return_value=success):
-                validate.run_command(
-                    ["tool", f"--log-file={detail}"],
-                    Path(directory),
-                    True,
-                    validation_log,
-                )
+            with redirect_stdout(console):
+                with validate.validation_test(validation_log, "[synthetic] example"):
+                    with mock.patch.object(
+                        validate.subprocess, "run", return_value=success
+                    ):
+                        validate.run_command(
+                            ["tool", f"--log-file={detail}"],
+                            Path(directory),
+                            True,
+                            validation_log,
+                        )
             rendered = stream.getvalue()
             self.assertIn("=" * 80, rendered)
             self.assertIn("TEST: [synthetic] example", rendered)
+            self.assertIn(
+                "TEST RESULT: PASS — [synthetic] example", rendered
+            )
             self.assertIn(f"Working directory: {directory}", rendered)
             self.assertIn("Exit status: 0", rendered)
             self.assertIn("Captured output", rendered)
             self.assertIn("verbose detail", rendered)
+            with redirect_stdout(console):
+                with self.assertRaisesRegex(RuntimeError, "synthetic failure"):
+                    with validate.validation_test(
+                        validation_log, "[synthetic] failure"
+                    ):
+                        raise RuntimeError("synthetic failure")
+            self.assertIn(
+                "TEST RESULT: FAIL — [synthetic] failure", stream.getvalue()
+            )
+            self.assertIn("[synthetic] example ... PASS", console.getvalue())
+            self.assertIn("[synthetic] failure ... FAIL", console.getvalue())
         failure = SimpleNamespace(returncode=2, stdout="failed")
         with mock.patch.object(validate.subprocess, "run", return_value=failure):
             with self.assertRaisesRegex(validate.ValidationError, "expected success"):
@@ -268,24 +287,17 @@ class ValidatePhysicalTestDataTests(unittest.TestCase):
             with self.assertRaisesRegex(validate.ValidationError, "acquisition"):
                 validate.assert_offline_log(log)
 
-    def test_accuraterip_requirements_are_manifest_driven_and_fail_closed(self):
+    def test_accuraterip_requirements_are_state_driven_and_fail_closed(self):
         manifest = synthetic_manifest()
         scenario = manifest["scenarios"][0]
         self.assertEqual(
-            validate.expected_accuraterip_tracks(manifest, scenario),
+            validate.accuraterip_tracks(manifest, scenario),
             (1,),
         )
         self.assertEqual(
-            validate.expected_accuraterip_tracks(
+            validate.accuraterip_tracks(
                 manifest,
                 dict(scenario, selected_tracks=[0, 2]),
-            ),
-            (),
-        )
-        self.assertEqual(
-            validate.expected_accuraterip_tracks(
-                manifest,
-                dict(scenario, expected_media_errors=True),
             ),
             (),
         )
@@ -295,9 +307,39 @@ class ValidatePhysicalTestDataTests(unittest.TestCase):
             data_first["layout"]["tracks"][0],
         ]
         self.assertEqual(
-            validate.expected_accuraterip_tracks(data_first, scenario),
+            validate.accuraterip_tracks(data_first, scenario),
             (),
         )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prefix = root / "dump"
+            log = root / "validation.log"
+            log.write_text("disc write offset: 0\n", encoding="utf-8")
+            scenario = dict(scenario, existing_dump="dump")
+            with mock.patch.object(
+                validate,
+                "inspect_track_media_errors",
+                return_value={1: {"SCSI": 0, "C2": 0}},
+            ) as inspect:
+                self.assertEqual(
+                    validate.expected_accuraterip_results(
+                        root, manifest, scenario, log
+                    ),
+                    {1: "verified"},
+                )
+            self.assertEqual(inspect.call_args.args[0], prefix.with_suffix(".state"))
+            with mock.patch.object(
+                validate,
+                "inspect_track_media_errors",
+                return_value={1: {"SCSI": 0, "C2": 3}},
+            ):
+                self.assertEqual(
+                    validate.expected_accuraterip_results(
+                        root, manifest, scenario, log
+                    ),
+                    {1: "no match"},
+                )
 
         with tempfile.TemporaryDirectory() as directory:
             log = Path(directory) / "validation.log"
@@ -305,15 +347,16 @@ class ValidatePhysicalTestDataTests(unittest.TestCase):
                 "Track 01: verified (ARv2 12345678, confidence 4)\n",
                 encoding="utf-8",
             )
-            validate.assert_accuraterip(log, (1,))
+            validate.assert_accuraterip(log, {1: "verified"})
             log.write_text(
                 "Track 01: no match (ARv1 1, ARv2 2)\n",
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(validate.ValidationError, "did not verify"):
-                validate.assert_accuraterip(log, (1,))
+            validate.assert_accuraterip(log, {1: "no match"})
+            with self.assertRaisesRegex(validate.ValidationError, "result mismatch"):
+                validate.assert_accuraterip(log, {1: "verified"})
             with self.assertRaisesRegex(validate.ValidationError, "results differ"):
-                validate.assert_accuraterip(log, (1, 2))
+                validate.assert_accuraterip(log, {1: "verified", 2: "verified"})
 
 
 if __name__ == "__main__":

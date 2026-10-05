@@ -21,6 +21,7 @@ if str(SOURCE) not in sys.path:
     sys.path.insert(0, str(SOURCE))
 
 from redumper_cdda.integrity import (  # noqa: E402
+    inspect_track_media_errors,
     parse_split_write_offsets,
     state_offset_for_lba,
 )
@@ -55,6 +56,14 @@ class ValidationLog:
         self._stream.write(f"\n{separator}\nTEST: {name}\n{separator}\n")
         self._stream.flush()
 
+    def finish_test(self, name, passed):
+        separator = "-" * 80
+        result = "PASS" if passed else "FAIL"
+        self._stream.write(
+            f"\n{separator}\nTEST RESULT: {result} — {name}\n{separator}\n"
+        )
+        self._stream.flush()
+
     def record(self, command, cwd, result):
         self._stream.write(f"\nWorking directory: {cwd}\n")
         self._stream.write("Command: " + " ".join(str(item) for item in command) + "\n")
@@ -79,6 +88,30 @@ class ValidationLog:
             )
             self._stream.write("\n")
         self._stream.flush()
+
+
+@contextmanager
+def validation_test(validation_log, name):
+    print(f"{name} ... ", end="", flush=True)
+    if validation_log is None:
+        try:
+            yield
+        except BaseException:
+            print("FAIL", flush=True)
+            raise
+        else:
+            print("PASS", flush=True)
+        return
+    validation_log.start_test(name)
+    try:
+        yield
+    except BaseException:
+        validation_log.finish_test(name, passed=False)
+        print("FAIL", flush=True)
+        raise
+    else:
+        validation_log.finish_test(name, passed=True)
+        print("PASS", flush=True)
 
 
 def parser():
@@ -343,9 +376,7 @@ def assert_offline_log(log_path):
         )
 
 
-def expected_accuraterip_tracks(manifest, scenario):
-    if scenario.get("expected_media_errors", False):
-        return ()
+def accuraterip_tracks(manifest, scenario):
     disc_tracks = manifest["layout"]["tracks"]
     if disc_tracks and disc_tracks[0]["kind"] == "data":
         return ()
@@ -356,8 +387,46 @@ def expected_accuraterip_tracks(manifest, scenario):
     )
 
 
-def assert_accuraterip(log_path, expected_tracks):
-    if not expected_tracks:
+def expected_accuraterip_results(profile_dir, manifest, scenario, log_path):
+    numbers = accuraterip_tracks(manifest, scenario)
+    if not numbers:
+        return {}
+    try:
+        output = log_path.read_text(encoding="utf-8", errors="replace")
+        offsets = parse_split_write_offsets(output)
+        tracks = [
+            {
+                "number": number,
+                "begin": selected_track(manifest, number)["begin_lba"],
+                "end": (
+                    selected_track(manifest, number)["begin_lba"]
+                    + selected_track(manifest, number)["length_sectors"]
+                ),
+            }
+            for number in numbers
+        ]
+        prefix = safe_child(
+            profile_dir, scenario["existing_dump"], "existing dump"
+        )
+        errors = inspect_track_media_errors(
+            prefix.with_suffix(".state"), tracks, offsets
+        )
+    except (OSError, RuntimeError) as exc:
+        raise ValidationError(
+            f"could not determine AccurateRip expectations from captured state: {exc}"
+        ) from exc
+    return {
+        number: (
+            "no match"
+            if errors[number]["SCSI"] or errors[number]["C2"]
+            else "verified"
+        )
+        for number in numbers
+    }
+
+
+def assert_accuraterip(log_path, expected_results):
+    if not expected_results:
         return
     try:
         output = log_path.read_text(encoding="utf-8", errors="replace")
@@ -371,20 +440,23 @@ def assert_accuraterip(log_path, expected_tracks):
             re.MULTILINE,
         )
     }
-    expected = set(expected_tracks)
-    if set(results) != expected:
+    if set(results) != set(expected_results):
         raise ValidationError(
             f"AccurateRip results differ in {log_path}: "
-            f"expected Tracks {sorted(expected)}, got {sorted(results)}"
+            f"expected Tracks {sorted(expected_results)}, got {sorted(results)}"
         )
-    failed = sorted(
-        number for number, status in results.items() if status != "verified"
-    )
-    if failed:
-        label = "Track" if len(failed) == 1 else "Tracks"
+    mismatches = [
+        (number, expected_results[number], results[number])
+        for number in sorted(expected_results)
+        if results[number] != expected_results[number]
+    ]
+    if mismatches:
         raise ValidationError(
-            f"AccurateRip did not verify {label} "
-            + ", ".join(f"{number:02d}" for number in failed)
+            "AccurateRip result mismatch: "
+            + ", ".join(
+                f"Track {number:02d} expected {expected}, got {actual}"
+                for number, expected, actual in mismatches
+            )
         )
 
 
@@ -594,17 +666,20 @@ def validate_scenario(
     scenario_dir = workdir / scenario["name"]
     separate_dir = scenario_dir / "separate"
     separate_dir.mkdir(parents=True)
-    accuraterip_tracks = expected_accuraterip_tracks(manifest, scenario)
+    accuraterip_numbers = accuraterip_tracks(manifest, scenario)
     command = extraction_command(
         launcher,
         profile_dir,
         scenario,
         separate_dir,
-        accuraterip=bool(accuraterip_tracks),
+        accuraterip=bool(accuraterip_numbers),
     )
     run_command(command, separate_dir, expect_success=True, validation_log=validation_log)
     assert_offline_log(separate_dir / "validation.log")
-    assert_accuraterip(separate_dir / "validation.log", accuraterip_tracks)
+    accuraterip_results = expected_accuraterip_results(
+        profile_dir, manifest, scenario, separate_dir / "validation.log"
+    )
+    assert_accuraterip(separate_dir / "validation.log", accuraterip_results)
     expected = expected_outputs(manifest, scenario, separate_dir)
     separate_hashes = validate_output_set(expected)
 
@@ -619,11 +694,11 @@ def validate_scenario(
             scenario,
             single_dir,
             single_file=True,
-            accuraterip=bool(accuraterip_tracks),
+            accuraterip=bool(accuraterip_numbers),
         )
         run_command(command, single_dir, expect_success=True, validation_log=validation_log)
         assert_offline_log(single_dir / "validation.log")
-        assert_accuraterip(single_dir / "validation.log", accuraterip_tracks)
+        assert_accuraterip(single_dir / "validation.log", accuraterip_results)
         single_expected = expected_outputs(
             manifest, scenario, single_dir, single_file=True
         )
@@ -642,11 +717,11 @@ def validate_scenario(
             scenario,
             single_dir,
             single_file=True,
-            accuraterip=bool(accuraterip_tracks),
+            accuraterip=bool(accuraterip_numbers),
         )
         run_command(command, single_dir, expect_success=True, validation_log=validation_log)
         assert_offline_log(single_dir / "validation.log")
-        assert_accuraterip(single_dir / "validation.log", accuraterip_tracks)
+        assert_accuraterip(single_dir / "validation.log", accuraterip_results)
         single_hashes = validate_output_set(
             expected_outputs(manifest, scenario, single_dir, single_file=True)
         )
@@ -762,47 +837,45 @@ def validate(args, validation_log=None):
     with work_directory(args.keep_work) as workdir:
         for profile_dir, manifest in manifests:
             profile = manifest["profile"]
-            print(f"\n[{profile}] layout", flush=True)
-            if validation_log is not None:
-                validation_log.start_test(f"[{profile}] layout")
-            layout_dir = workdir / profile / "layout"
-            layout_dir.mkdir(parents=True)
-            layout_scenario = manifest["scenarios"][0]
-            command = extraction_command(
-                launcher,
-                profile_dir,
-                layout_scenario,
-                layout_dir,
-                show_layout=True,
-            )
-            layout = run_command(
-                command,
-                layout_dir,
-                expect_success=True,
-                validation_log=validation_log,
-            ).stdout
-            for track in manifest["layout"]["tracks"]:
-                pattern = rf"^\s*{track['number']}\s+{track['kind']}\s+"
-                if not re.search(pattern, layout, re.MULTILINE):
-                    raise ValidationError(
-                        f"layout output omits Track {track['number']:02d}: {profile}"
-                    )
-
-            for scenario in manifest["scenarios"]:
-                print(f"[{profile}] {scenario['name']}", flush=True)
-                if validation_log is not None:
-                    validation_log.start_test(f"[{profile}] {scenario['name']}")
-                outputs = validate_scenario(
+            print()
+            with validation_test(validation_log, f"[{profile}] layout"):
+                layout_dir = workdir / profile / "layout"
+                layout_dir.mkdir(parents=True)
+                layout_scenario = manifest["scenarios"][0]
+                command = extraction_command(
                     launcher,
                     profile_dir,
-                    manifest,
-                    scenario,
-                    workdir / profile,
-                    validation_log,
+                    layout_scenario,
+                    layout_dir,
+                    show_layout=True,
                 )
-                if not scenario.get("expected_media_errors", False):
-                    for number, output in outputs.items():
-                        parity.setdefault((profile, number), []).append(output)
+                layout = run_command(
+                    command,
+                    layout_dir,
+                    expect_success=True,
+                    validation_log=validation_log,
+                ).stdout
+                for track in manifest["layout"]["tracks"]:
+                    pattern = rf"^\s*{track['number']}\s+{track['kind']}\s+"
+                    if not re.search(pattern, layout, re.MULTILINE):
+                        raise ValidationError(
+                            f"layout output omits Track {track['number']:02d}: {profile}"
+                        )
+
+            for scenario in manifest["scenarios"]:
+                test_name = f"[{profile}] {scenario['name']}"
+                with validation_test(validation_log, test_name):
+                    outputs = validate_scenario(
+                        launcher,
+                        profile_dir,
+                        manifest,
+                        scenario,
+                        workdir / profile,
+                        validation_log,
+                    )
+                    if not scenario.get("expected_media_errors", False):
+                        for number, output in outputs.items():
+                            parity.setdefault((profile, number), []).append(output)
 
         for (profile, number), outputs in parity.items():
             validate_track_parity(profile, number, outputs)

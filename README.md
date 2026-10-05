@@ -222,11 +222,11 @@ mixed single-file requests fail, clean tracks match across applicable captured
 ranges after accounting for redumper's reported disc write offset, and captured
 SCSI/C2 fixtures obey both default and strict policies. Audio parity still
 requires every shared PCM frame to match exactly; data parity requires an
-exact whole-file hash match. Every error-free scenario containing numbered
-audio tracks must also verify every such track against AccurateRip. Track 0,
-data-only scenarios, data-first discs (typically games with CDDA tracks), and
-captures intentionally containing media errors are excluded from that
-requirement.
+exact whole-file hash match. Every eligible scenario containing numbered audio
+tracks is also checked against AccurateRip. Tracks whose logical ranges have
+clean captured SCSI/C2 state must verify, while tracks containing captured SCSI
+or C2 errors must report no match. Track 0, data-only scenarios, and data-first
+discs (typically games with CDDA tracks) are excluded from that requirement.
 
 Generated WAVs and ISOs use a temporary directory and are removed after the
 run. To inspect them, provide a new path with `--keep-work=PATH`. Restrict a
@@ -240,7 +240,11 @@ exists; otherwise it uses the validator's current Python interpreter.
 Use `--log-file=PATH` to retain a consolidated diagnostic log. A prominent
 named header separates each test, followed by its commands, working
 directories, exit statuses, captured output, and the verbose application logs
-that would otherwise be removed with the temporary validation workspace:
+that would otherwise be removed with the temporary validation workspace. Each
+test ends with an explicit named `TEST RESULT: PASS` or `TEST RESULT: FAIL`
+section; standard output also finishes every test-case line with `PASS` or
+`FAIL`. These results are separate from the extraction's SCSI/C2 integrity
+status:
 
 ``` bash
 ./scripts/validate_physical_test_data.py --log-file=validation.log
