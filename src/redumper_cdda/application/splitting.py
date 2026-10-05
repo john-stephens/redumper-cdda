@@ -67,12 +67,6 @@ class SplitService:
                         {"errors": imported_errors, "pass_number": None},
                     )
                 )
-                self._reporter.publish(
-                    LifecycleEvent(
-                        "warning",
-                        "Q error status is unavailable for an existing dump",
-                    )
-                )
                 self._apply_single_file_policy(request, imported_errors)
                 if imported_errors.has_data_errors and not request.abort_on_skip:
                     self._reporter.publish(

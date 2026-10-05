@@ -88,8 +88,7 @@ options described below.
 
 For an existing dump, unresolved SCSI/C2 state is determined from the copied
 `.state` file using the write-offset mapping reported by split. The same
-default and `--abort-on-skip` policies apply. Historical Q counts cannot be
-reconstructed from the dump state and are reported as unavailable.
+default and `--abort-on-skip` policies apply.
 
 ### File-backed TOCs and offline debugging
 
@@ -317,7 +316,7 @@ redumper-cdda /dev/sg4 1-3 --prefix album
 
 Normal output is concise, with a track summary and one completed progress line
 per track during dumping and refinement. Each line shows the track-relative
-percentage and that track's current SCSI, C2, and Q counts.
+percentage and that track's current SCSI and C2 counts.
 Use `-v` or `--verbose` to show executed
 commands, complete redumper output, exact ranges, split segments, and
 the full integrity summary:
@@ -352,10 +351,10 @@ affected track files are omitted; the command exits nonzero to report the
 omissions. With `--single-file`, any unresolved SCSI/C2 error rejects the one
 combined output, so no output file is created.
 
-## Understanding SCSI, C2, and Q counts
+## Understanding SCSI and C2 counts
 
-CD drives report several different kinds of read problems. The three counters
-shown during a rip do not all mean the same thing:
+CD drives report different kinds of read problems. The two counters shown
+during a rip have different meanings:
 
 -   **SCSI** means the drive could not successfully complete a low-level read
     request. This can be caused by severe damage, an unreadable area, a drive
@@ -366,17 +365,12 @@ shown during a rip do not all mean the same thing:
     its internal CD error correction could not fully trust. Scratches, dirt,
     deterioration, and marginal drive/media combinations commonly cause C2
     errors. Refinement rereads these locations and may reduce the count.
--   **Q** refers to the Q portion of the CD subchannel. It carries navigation
-    information such as track, index, and timing data rather than the main
-    audio samples. Q errors are informational: this program does not explicitly
-    refine them, and they do not by themselves make the audio payload fail or
-    keep unlimited refinement running.
 
-The preferred final result is `SCSI=0, C2=0`. A nonzero Q count may still be
-reported separately. By default, output is written with a clear warning if
-SCSI or C2 remain after the configured passes. Use `--abort-on-skip` when you
-would rather omit affected output, or `--refine-forever` when you want to keep
-trying until the SCSI and C2 counts both reach zero.
+The preferred final result is `SCSI=0, C2=0`. By default, output is written
+with a clear warning if SCSI or C2 remain after the configured passes. Use
+`--abort-on-skip` when you would rather omit affected output, or
+`--refine-forever` when you want to keep trying until the SCSI and C2 counts
+both reach zero.
 
 By default, the script calculates ARv1 and ARv2 checksums with ARver and
 compares selected audio tracks with the AccurateRip database automatically:

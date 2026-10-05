@@ -78,7 +78,7 @@ class ConciseReporter:
     def _progress(self, values):
         self._output(
             f"\r{values['label']}: {values['percent']:3d}% "
-            f"SCSI={values['scsi']} C2={values['c2']} Q={values['q']}",
+            f"SCSI={values['scsi']} C2={values['c2']}",
             end="",
             flush=True,
         )
@@ -115,8 +115,7 @@ class ConciseReporter:
                 "due to unresolved SCSI/C2 errors."
             )
         else:
-            q = "unavailable" if errors.q is None else errors.q
-            self._output(f"Done. SCSI={errors.scsi}, C2={errors.c2}, Q={q}")
+            self._output(f"Done. SCSI={errors.scsi}, C2={errors.c2}")
 
     def _disc_layout(self, layout):
         self._output("\nDisc track layout\n-----------------")

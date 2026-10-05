@@ -197,7 +197,8 @@ class SplitServiceTests(unittest.TestCase):
         warnings = [
             event.values for event in reporter.events if event.name == "warning"
         ]
-        self.assertEqual(len(warnings), 2)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("SCSI=2, C2=3", warnings[0])
 
     def test_existing_dump_applies_both_strict_error_policies(self):
         track = Track(1, TrackKind.AUDIO, 0, 0, 10)

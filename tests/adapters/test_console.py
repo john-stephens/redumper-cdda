@@ -117,10 +117,10 @@ class ConsoleReporterTests(unittest.TestCase):
         reporter.publish(LifecycleEvent("unknown"))
         rendered = "\n".join(line for line, _options in self.lines)
         self.assertIn("Ripping track 01", rendered)
-        self.assertIn("Reading:  50% SCSI=1 C2=2 Q=3", rendered)
+        self.assertIn("Reading:  50% SCSI=1 C2=2", rendered)
         self.assertIn("Skipping Track 01", rendered)
         self.assertIn("data", rendered)
-        self.assertIn("Q=unavailable", rendered)
+        self.assertNotIn("Q=", rendered)
 
     def test_verbose_all_events(self):
         reporter = VerboseReporter(self.output)
