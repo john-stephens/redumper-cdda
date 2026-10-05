@@ -305,7 +305,9 @@ redumper-cdda /dev/sg4 -d  # Full disc, including data tracks
 With `--include-data`, ranges include both audio and data tracks. Audio files
 are named `PREFIXNN.wav` and data files are named `PREFIXNN.iso`, where the
 default prefix is `track`. Without this option, the established audio-only
-range rules remain unchanged.
+range rules remain unchanged. For a final-session data track, disc-absolute
+ISO9660/Joliet addresses are rebased so the resulting session-sized ISO can be
+mounted directly.
 
 By default, each selected track is written separately as `trackNN.wav` or
 `trackNN.iso`. Use `-s` or `--single-file` to combine a multi-track audio range

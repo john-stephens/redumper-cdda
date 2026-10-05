@@ -10,7 +10,7 @@ class IsoOutputWriter:
     def write(self, resolved, temporary_path, verbose=False):
         try:
             self._converter(
-                self._serialize(resolved.data_source),
+                self._serialize(resolved),
                 temporary_path,
                 verbose=verbose,
             )
@@ -18,7 +18,8 @@ class IsoOutputWriter:
             raise IsoOutputError(str(exc)) from exc
 
     @staticmethod
-    def _serialize(source):
+    def _serialize(resolved):
+        source = resolved.data_source
         return {
             "cue_path": source.cue_path,
             "path": source.path,
@@ -27,4 +28,6 @@ class IsoOutputWriter:
             "sector_size": source.sector_size,
             "start_sector": source.start_sector,
             "sectors": source.sectors,
+            "track_begin_lba": resolved.plan.track.begin_lba,
+            "track_sectors": resolved.plan.expected_sectors,
         }

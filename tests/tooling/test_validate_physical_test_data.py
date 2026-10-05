@@ -168,12 +168,53 @@ class ValidatePhysicalTestDataTests(unittest.TestCase):
             descriptor[84:88] = blocks.to_bytes(4, "big")
             descriptor[128:130] = (2048).to_bytes(2, "little")
             descriptor[130:132] = (2048).to_bytes(2, "big")
+            descriptor[156] = 34
+            descriptor[158:162] = (16).to_bytes(4, "little")
+            descriptor[162:166] = (16).to_bytes(4, "big")
+            descriptor[166:170] = (2048).to_bytes(4, "little")
+            descriptor[170:174] = (2048).to_bytes(4, "big")
             iso_path.write_bytes(image)
-            self.assertEqual(validate.iso_hash(iso_path), validate.sha256_file(iso_path))
+            self.assertEqual(
+                validate.iso_hash(iso_path, blocks), validate.sha256_file(iso_path)
+            )
+            with self.assertRaisesRegex(validate.ValidationError, "exceeds"):
+                validate.iso_hash(iso_path, blocks - 1)
             descriptor[84:88] = (18).to_bytes(4, "big")
             iso_path.write_bytes(image)
             with self.assertRaisesRegex(validate.ValidationError, "disagree"):
-                validate.iso_hash(iso_path)
+                validate.iso_hash(iso_path, blocks)
+
+            descriptor[84:88] = blocks.to_bytes(4, "big")
+            descriptor[132:136] = (1).to_bytes(4, "little")
+            descriptor[136:140] = (2).to_bytes(4, "big")
+            iso_path.write_bytes(image)
+            with self.assertRaisesRegex(validate.ValidationError, "path-table sizes"):
+                validate.iso_hash(iso_path, blocks)
+
+            descriptor[136:140] = (1).to_bytes(4, "big")
+            descriptor[140:144] = blocks.to_bytes(4, "little")
+            iso_path.write_bytes(image)
+            with self.assertRaisesRegex(validate.ValidationError, "path table lies"):
+                validate.iso_hash(iso_path, blocks)
+
+            descriptor[132:140] = bytes(8)
+            descriptor[140:144] = bytes(4)
+            descriptor[156] = 0
+            iso_path.write_bytes(image)
+            with self.assertRaisesRegex(validate.ValidationError, "record is malformed"):
+                validate.iso_hash(iso_path, blocks)
+
+            descriptor[156] = 34
+            descriptor[162:166] = (15).to_bytes(4, "big")
+            iso_path.write_bytes(image)
+            with self.assertRaisesRegex(validate.ValidationError, "directory fields"):
+                validate.iso_hash(iso_path, blocks)
+
+            descriptor[158:162] = blocks.to_bytes(4, "little")
+            descriptor[162:166] = blocks.to_bytes(4, "big")
+            iso_path.write_bytes(image)
+            with self.assertRaisesRegex(validate.ValidationError, "directory lies"):
+                validate.iso_hash(iso_path, blocks)
 
     def test_audio_parity_accounts_for_reported_write_offsets(self):
         with tempfile.TemporaryDirectory() as directory:

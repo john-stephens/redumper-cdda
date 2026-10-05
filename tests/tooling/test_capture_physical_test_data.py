@@ -48,7 +48,12 @@ class CapturePhysicalTestDataTests(unittest.TestCase):
         self.assertEqual(len(capture.scenarios_for("regular-audio", audio)), 6)
         self.assertEqual(len(capture.scenarios_for("track0-pregap", pregap)), 5)
         self.assertEqual(len(capture.scenarios_for("data-first", data_first)), 4)
-        self.assertEqual(len(capture.scenarios_for("data-last", data_last)), 4)
+        data_last_scenarios = capture.scenarios_for("data-last", data_last)
+        self.assertEqual(len(data_last_scenarios), 5)
+        final_data = data_last_scenarios[-1]
+        self.assertEqual(final_data.name, "d07-final-data-track")
+        self.assertEqual(final_data.selection, capture.TrackSelection(3, 3))
+        self.assertTrue(final_data.include_data)
         data_scenarios = capture.scenarios_for("data-only", data_only)
         self.assertEqual(len(data_scenarios), 2)
         self.assertTrue(all(item.include_data for item in data_scenarios))

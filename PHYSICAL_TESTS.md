@@ -412,7 +412,7 @@ Expected:
 
 ### D06 - Imported enhanced-CD extraction
 
-Repeat D02, D04, and D05 using their corresponding captured dumps and the
+Repeat D02, D04, D05, and D07 using their corresponding captured dumps and the
 captured cdparanoia TOC. Expected:
 
 -   Live and imported WAV and ISO outputs are identical.
@@ -420,6 +420,22 @@ captured cdparanoia TOC. Expected:
     included.
 -   The original dump metadata is unchanged even though split temporarily
     bounds the workspace copy.
+
+### D07 - Final data track alone
+
+``` bash
+redumper-cdda /dev/sg4 D --include-data --log-file=D07.log
+redumper-cdda /dev/sg4 D --include-data --single-file --log-file=D07s.log
+```
+
+Expected:
+
+-   Only the final data track is read and converted.
+-   Separate and single-file modes produce identical ISO output.
+-   The ISO begins at Track `D` INDEX 01, is directly mountable, and is
+    trimmed to its declared ISO9660 volume size.
+-   The ISO volume and all checked filesystem metadata remain within the
+    physical length of Track `D`.
 
 ## E. Data-only CD
 

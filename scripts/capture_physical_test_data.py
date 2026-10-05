@@ -306,6 +306,12 @@ def scenarios_for(
                 TrackSelection(),
                 True,
             ),
+            Scenario(
+                "d07-final-data-track",
+                ("D07", "D07s", "D06 D07"),
+                TrackSelection(final, final),
+                True,
+            ),
         )
     if profile == "data-only":
         if any(track.kind is not TrackKind.DATA for track in tracks):

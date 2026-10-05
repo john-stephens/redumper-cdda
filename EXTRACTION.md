@@ -98,8 +98,12 @@ bytes. MODE0, malformed sectors, and unknown modes fail closed.
 
 The converted file must contain a valid ISO9660 primary volume descriptor,
 matching little- and big-endian volume sizes, and a 2048-byte logical block
-size. It is trimmed to the filesystem's declared volume size. Consequently,
-`trackNN.iso` is a mountable filesystem image rather than a renamed raw BIN.
+size. Final-session data tracks may encode ISO9660 and Joliet extents as
+absolute disc LBAs. Those volume, path-table, root-directory, and directory
+record addresses are rebased to the selected track's INDEX 01 before the image
+is trimmed to the session-relative filesystem size. Consequently,
+`trackNN.iso` is a directly mountable filesystem image rather than a renamed
+raw BIN or a whole-disc-sized sparse address space.
 
 ### Track 0 / hidden audio
 

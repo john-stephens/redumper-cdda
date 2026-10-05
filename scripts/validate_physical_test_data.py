@@ -494,7 +494,7 @@ def wave_pcm_hash(path, expected_sectors):
     return digest.hexdigest()
 
 
-def iso_hash(path):
+def iso_hash(path, expected_track_sectors):
     try:
         size = path.stat().st_size
         with path.open("rb") as stream:
@@ -512,6 +512,41 @@ def iso_hash(path):
         raise ValidationError(f"ISO9660 endian fields disagree: {path}")
     if little_block_size != 2048 or size != little_blocks * 2048:
         raise ValidationError(f"ISO9660 output is not exactly trimmed: {path}")
+    if little_blocks <= 0 or little_blocks > expected_track_sectors:
+        raise ValidationError(
+            f"ISO9660 volume exceeds its data track in {path}: "
+            f"{little_blocks} > {expected_track_sectors} sectors"
+        )
+
+    path_table_size = int.from_bytes(descriptor[132:136], "little")
+    if path_table_size != int.from_bytes(descriptor[136:140], "big"):
+        raise ValidationError(f"ISO9660 path-table sizes disagree: {path}")
+    for offset, byteorder in (
+        (140, "little"),
+        (144, "little"),
+        (148, "big"),
+        (152, "big"),
+    ):
+        location = int.from_bytes(descriptor[offset:offset + 4], byteorder)
+        if location and location * 2048 + path_table_size > size:
+            raise ValidationError(
+                f"ISO9660 path table lies outside the output: {path}"
+            )
+
+    root = descriptor[156:190]
+    if root[0] < 34:
+        raise ValidationError(f"ISO9660 root directory record is malformed: {path}")
+    root_extent = int.from_bytes(root[2:6], "little")
+    root_size = int.from_bytes(root[10:14], "little")
+    if (
+        root_extent != int.from_bytes(root[6:10], "big")
+        or root_size != int.from_bytes(root[14:18], "big")
+    ):
+        raise ValidationError(f"ISO9660 root directory fields disagree: {path}")
+    if root_extent * 2048 + root_size > size:
+        raise ValidationError(
+            f"ISO9660 root directory lies outside the output: {path}"
+        )
     return sha256_file(path)
 
 
@@ -548,7 +583,9 @@ def validate_output_set(expected):
     hashes = {}
     for path, kind, sectors, number in expected:
         hashes[number] = (
-            wave_pcm_hash(path, sectors) if kind == "audio" else iso_hash(path)
+            wave_pcm_hash(path, sectors)
+            if kind == "audio"
+            else iso_hash(path, sectors)
         )
     return hashes
 
