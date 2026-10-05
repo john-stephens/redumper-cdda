@@ -22,12 +22,8 @@ def _rebase_path_table(image, location, size, byteorder, session_start_lba, volu
     if len(table) != size:
         raise RuntimeError("Short ISO9660 path table.")
     offset = 0
-    while offset < size:
+    while offset < size and table[offset] != 0:
         identifier_length = table[offset]
-        if identifier_length == 0:
-            if any(table[offset:]):
-                raise RuntimeError("Malformed ISO9660 path table.")
-            break
         entry_length = 8 + identifier_length + (identifier_length & 1)
         if offset + entry_length > size:
             raise RuntimeError("Malformed ISO9660 path table.")
@@ -37,6 +33,8 @@ def _rebase_path_table(image, location, size, byteorder, session_start_lba, volu
         )
         table[offset + 2:offset + 6] = relative_lba.to_bytes(4, byteorder)
         offset += entry_length
+    if offset < size and any(table[offset:]):
+        raise RuntimeError("Malformed ISO9660 path table.")
     image.seek(location * ISO_SECTOR_SIZE)
     image.write(table)
 
