@@ -166,6 +166,10 @@ def verify_with_accuraterip(
         for item in verification_tracks
         if item["track"]["number"] != 0
     ]
+    requested_by_number = {
+        item["track"]["number"]: item
+        for item in requested
+    }
 
     if not requested:
         raise RuntimeError(
@@ -214,10 +218,35 @@ def verify_with_accuraterip(
             / f"accuraterip-track{track['number']:02d}.wav"
         )
 
+        write_offset = item.get("write_offset", 0)
+        preceding_segments = ()
+        following_segments = ()
+        if write_offset > 0 and audio_index > 1:
+            previous = requested_by_number.get(
+                audio_tracks[audio_index - 2]["number"]
+            )
+            if previous is not None and previous.get("write_offset", 0) == write_offset:
+                preceding_segments = previous["segments"]
+            else:
+                write_offset = 0
+        elif write_offset < 0 and audio_index < len(audio_tracks):
+            following = requested_by_number.get(
+                audio_tracks[audio_index]["number"]
+            )
+            if following is not None and following.get("write_offset", 0) == write_offset:
+                following_segments = following["segments"]
+            else:
+                write_offset = 0
+        elif write_offset != 0:
+            write_offset = 0
+
         segments_to_wav(
             item["segments"],
             wav_path,
             track["length"],
+            write_offset=write_offset,
+            preceding_segments=preceding_segments,
+            following_segments=following_segments,
         )
 
         try:

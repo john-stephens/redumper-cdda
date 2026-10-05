@@ -397,11 +397,13 @@ redumper-cdda /dev/sg4 2
 
 AccurateRip verification uses the complete MMC disc layout to identify the
 pressing even when only part of the disc is selected. Track 0 and data tracks
-are not tracked by AccurateRip. A database miss, network failure, or checksum
-mismatch does not delete completed output, and AccurateRip results do not
-replace the separate redumper SCSI/C2 integrity status. A data-only selection
-is extracted normally and automatically skips AccurateRip; it does not require
-an audio track or `--no-accuraterip`.
+are not tracked by AccurateRip. For mixed audio/data selections, checksum-only
+WAVs account for redumper's reported split write offset using adjacent audio;
+the completed WAV files are not shifted or changed. A database miss, network
+failure, or checksum mismatch does not delete completed output, and AccurateRip
+results do not replace the separate redumper SCSI/C2 integrity status. A
+data-only selection is extracted normally and automatically skips AccurateRip;
+it does not require an audio track or `--no-accuraterip`.
 
 Use `--no-accuraterip` to disable AccurateRip verification even when ARver is
 installed:

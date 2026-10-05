@@ -6,7 +6,7 @@ from unittest import mock
 from redumper_cdda.application.splitting import SplitService
 from redumper_cdda.domain.errors import IntegrityStatusError, SplitError
 from redumper_cdda.domain.disc import Track, TrackKind
-from redumper_cdda.domain.integrity import MediaErrors, TrackMediaErrors
+from redumper_cdda.domain.integrity import MediaErrors, TrackMediaErrors, WriteOffsetMap
 from redumper_cdda.domain.outputs import AudioSegment, DataTrackSource, OutputKind, OutputPlan
 from redumper_cdda.ports.process import CommandResult
 from tests.contracts.fakes import RecordingReporter
@@ -43,9 +43,11 @@ class SplitServiceTests(unittest.TestCase):
         resolver = mock.Mock()
         segment = AudioSegment(Path("audio.bin"), 1, 0, 10, 10)
         resolver.resolve.return_value = ((segment,), Path("disc.cue"), 0)
+        parser = mock.Mock()
+        parser.write_offsets.return_value = WriteOffsetMap(((0, -153),))
         service = SplitService(
             redumper,
-            mock.Mock(),
+            parser,
             mock.Mock(),
             resolver,
             mock.Mock(),
@@ -62,6 +64,7 @@ class SplitServiceTests(unittest.TestCase):
 
         self.assertEqual(result.outputs[0].audio_segments, (segment,))
         self.assertEqual(result.verification_tracks[0].track, track)
+        self.assertEqual(result.verification_tracks[0].write_offset, -153)
         redumper.split.assert_called_once_with(plan)
 
     def test_split_failure_and_integrity_parser_failure(self):

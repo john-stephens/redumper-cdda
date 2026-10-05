@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import wave
 from argparse import Namespace
 from contextlib import ExitStack, redirect_stdout
 from pathlib import Path
@@ -57,3 +58,70 @@ class OutputCoverageTests(unittest.TestCase):
             source.write_bytes(b"short")
             with self.assertRaisesRegex(RuntimeError, "Unexpected end"):
                 self.module.segments_to_wav([segment], root / "bad.wav", 1)
+
+    def test_wav_conversion_compensates_for_split_write_offset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def make_segment(name, first_frame):
+                path = root / name
+                frames = b"".join(
+                    value.to_bytes(4, "little")
+                    for value in range(
+                        first_frame,
+                        first_frame + self.module.FRAMES_PER_SECTOR,
+                    )
+                )
+                path.write_bytes(frames)
+                return {
+                    "path": path,
+                    "track": 1,
+                    "start_sector": 0,
+                    "sectors": 1,
+                    "bin_sectors": 1,
+                }
+
+            previous = make_segment("previous.bin", 0)
+            current = make_segment("current.bin", self.module.FRAMES_PER_SECTOR)
+            following = make_segment(
+                "following.bin", self.module.FRAMES_PER_SECTOR * 2
+            )
+
+            negative = root / "negative.wav"
+            self.module.segments_to_wav(
+                [current], negative, 1, write_offset=-2,
+                following_segments=[following],
+            )
+            with wave.open(str(negative), "rb") as stream:
+                payload = stream.readframes(self.module.FRAMES_PER_SECTOR)
+            self.assertEqual(int.from_bytes(payload[:4], "little"), 590)
+            self.assertEqual(int.from_bytes(payload[-4:], "little"), 1177)
+
+            positive = root / "positive.wav"
+            self.module.segments_to_wav(
+                [current], positive, 1, write_offset=2,
+                preceding_segments=[previous],
+            )
+            with wave.open(str(positive), "rb") as stream:
+                payload = stream.readframes(self.module.FRAMES_PER_SECTOR)
+            self.assertEqual(int.from_bytes(payload[:4], "little"), 586)
+            self.assertEqual(int.from_bytes(payload[-4:], "little"), 1173)
+
+            with self.assertRaisesRegex(RuntimeError, "Insufficient adjacent"):
+                self.module.segments_to_wav(
+                    [current], root / "missing.wav", 1, write_offset=-1
+                )
+
+            destination = mock.Mock()
+            self.module._write_segment_window(
+                destination,
+                [previous, current],
+                self.module.FRAMES_PER_SECTOR,
+                1,
+            )
+            self.assertEqual(
+                int.from_bytes(destination.writeframesraw.call_args.args[0], "little"),
+                self.module.FRAMES_PER_SECTOR,
+            )
+            with self.assertRaisesRegex(RuntimeError, "Insufficient adjacent"):
+                self.module._write_segment_window(destination, [], 0, 1)

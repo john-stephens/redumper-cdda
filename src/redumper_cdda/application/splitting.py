@@ -101,9 +101,15 @@ class SplitService:
                 "no output file was created."
             )
 
+        verification_offsets = (
+            self._integrity_parser.write_offsets(result.output)
+            if request.accuraterip
+            else None
+        )
         changed = changed_files(before)
         resolved, verification = self._resolve_sources(
-            plan, output_plans, changed, request.accuraterip
+            plan, output_plans, changed, request.accuraterip,
+            verification_offsets,
         )
         return SplitResult(resolved, omitted, verification, imported_errors)
 
@@ -147,7 +153,9 @@ class SplitService:
                 "specified with --single-file."
             )
 
-    def _resolve_sources(self, plan, output_plans, changed, accuraterip):
+    def _resolve_sources(
+        self, plan, output_plans, changed, accuraterip, verification_offsets=None
+    ):
         track_zero_sectors = (
             plan.selection.first_track.length_sectors
             if plan.selection.first_track.number == 0
@@ -186,7 +194,14 @@ class SplitService:
                 )
                 segments.extend(component)
                 if accuraterip and track.number != 0:
-                    verification.append(VerificationTrack(track, component))
+                    write_offset = (
+                        verification_offsets.offset_for_lba(track.begin_lba)
+                        if verification_offsets is not None
+                        else 0
+                    )
+                    verification.append(
+                        VerificationTrack(track, component, write_offset)
+                    )
                 if pregap is None:
                     pregap = skipped
             outputs.append(

@@ -72,6 +72,7 @@ class OmittedOutput:
 class VerificationTrack:
     track: object
     audio_segments: tuple
+    write_offset: int = 0
 
 
 @dataclass(frozen=True)

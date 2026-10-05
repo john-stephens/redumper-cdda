@@ -7,6 +7,43 @@ SECTOR_SIZE = 2352
 SAMPLE_RATE = 44100
 CHANNELS = 2
 SAMPLE_WIDTH = 2
+BYTES_PER_FRAME = CHANNELS * SAMPLE_WIDTH
+FRAMES_PER_SECTOR = SECTOR_SIZE // BYTES_PER_FRAME
+
+
+def _write_segment_window(destination, segments, start_frame, frames):
+    remaining = frames
+    skip = start_frame
+    block_frames = FRAMES_PER_SECTOR * 1024
+
+    for segment in segments:
+        segment_frames = segment["sectors"] * FRAMES_PER_SECTOR
+        if skip >= segment_frames:
+            skip -= segment_frames
+            continue
+
+        take = min(segment_frames - skip, remaining)
+        with segment["path"].open("rb") as source:
+            source_frame = (
+                segment["start_sector"] * FRAMES_PER_SECTOR + skip
+            )
+            source.seek(source_frame * BYTES_PER_FRAME)
+            pending = take
+            while pending:
+                count = min(block_frames, pending)
+                data = source.read(count * BYTES_PER_FRAME)
+                if len(data) != count * BYTES_PER_FRAME:
+                    raise RuntimeError("Unexpected end of BIN.")
+                destination.writeframesraw(data)
+                pending -= count
+        remaining -= take
+        skip = 0
+        if remaining == 0:
+            return
+
+    raise RuntimeError(
+        "Insufficient adjacent split AUDIO data for AccurateRip alignment."
+    )
 
 
 def segments_to_wav(
@@ -14,6 +51,9 @@ def segments_to_wav(
     wav_path,
     expected_sectors,
     verbose=False,
+    write_offset=0,
+    preceding_segments=(),
+    following_segments=(),
 ):
     total_sectors = sum(
         segment["sectors"]
@@ -77,7 +117,23 @@ def segments_to_wav(
         exist_ok=True,
     )
 
-    block_sectors = 1024
+    preceding_frames = sum(
+        segment["sectors"] * FRAMES_PER_SECTOR
+        for segment in preceding_segments
+    )
+    start_frame = preceding_frames - write_offset
+    output_frames = expected_sectors * FRAMES_PER_SECTOR
+    all_segments = (
+        tuple(preceding_segments) + tuple(segments) + tuple(following_segments)
+    )
+    available_frames = sum(
+        segment["sectors"] * FRAMES_PER_SECTOR
+        for segment in all_segments
+    )
+    if start_frame < 0 or start_frame + output_frames > available_frames:
+        raise RuntimeError(
+            "Insufficient adjacent split AUDIO data for AccurateRip alignment."
+        )
 
     with wave.open(
         str(wav_path),
@@ -88,48 +144,6 @@ def segments_to_wav(
         dst.setsampwidth(SAMPLE_WIDTH)
         dst.setframerate(SAMPLE_RATE)
 
-        for segment in segments:
-
-            with segment["path"].open(
-                "rb"
-            ) as src:
-
-                src.seek(
-                    segment["start_sector"]
-                    * SECTOR_SIZE
-                )
-
-                remaining = (
-                    segment["sectors"]
-                )
-
-                while remaining > 0:
-
-                    count = min(
-                        block_sectors,
-                        remaining,
-                    )
-
-                    expected_bytes = (
-                        count
-                        * SECTOR_SIZE
-                    )
-
-                    data = src.read(
-                        expected_bytes
-                    )
-
-                    if (
-                        len(data)
-                        != expected_bytes
-                    ):
-                        raise RuntimeError(
-                            "Unexpected end of BIN."
-                        )
-
-                    # No endian swap.
-                    dst.writeframesraw(
-                        data
-                    )
-
-                    remaining -= count
+        _write_segment_window(
+            dst, all_segments, start_frame, output_frames
+        )

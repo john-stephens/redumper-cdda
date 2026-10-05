@@ -32,6 +32,7 @@ class AccurateRipVerifier(Verifier):
             {
                 "track": self._serialize_track(item.track),
                 "segments": [self._segment_to_legacy(segment) for segment in item.audio_segments],
+                "write_offset": item.write_offset,
             }
             for item in split_result.verification_tracks
         ]

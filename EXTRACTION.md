@@ -232,7 +232,10 @@ package dependency. Verification runs by default and can be disabled with
 offsets and lead-out for the AccurateRip disc ID, while checksums are calculated
 only for selected audio tracks. Combined output is temporarily separated at the
 already established logical boundaries for checksumming; this does not trigger
-another redumper dump or split.
+another redumper dump or split. When a mixed audio/data split reports a nonzero
+write offset, checksum-only WAVs are realigned with PCM from the adjacent
+selected audio track. This prevents the split-wide offset from invalidating
+every AccurateRip result and does not modify final WAV output.
 
 ARv2 matches are preferred, with ARv1 used as a fallback. Report the matching
 version, checksum, and database confidence for each selected audio track.

@@ -60,6 +60,52 @@ class AccurateRipCoverageTests(unittest.TestCase):
                 [data, audio], [{"track": {**audio, "number": 0}, "segments": []}],
                 Path("."), library=library,
             )
+
+    def test_verification_uses_adjacent_audio_for_write_offset_alignment(self):
+        first = self.audio_track(1)
+        second = self.audio_track(2)
+        database = mock.Mock()
+        database.make_dict.return_value = {}
+        library = self.library(database)
+        verification = [
+            {"track": first, "segments": ["first"], "write_offset": -153},
+            {"track": second, "segments": ["second"], "write_offset": -153},
+        ]
+        with mock.patch.object(self.module, "segments_to_wav") as write:
+            self.module.verify_with_accuraterip(
+                [first, second], verification, Path("."), library=library
+            )
+        first_call, second_call = write.call_args_list
+        self.assertEqual(first_call.kwargs["write_offset"], -153)
+        self.assertEqual(first_call.kwargs["following_segments"], ["second"])
+        self.assertEqual(second_call.kwargs["write_offset"], 0)
+
+        verification[0]["write_offset"] = 153
+        verification[1]["write_offset"] = 153
+        with mock.patch.object(self.module, "segments_to_wav") as write:
+            self.module.verify_with_accuraterip(
+                [first, second], verification, Path("."), library=library
+            )
+        first_call, second_call = write.call_args_list
+        self.assertEqual(first_call.kwargs["write_offset"], 0)
+        self.assertEqual(second_call.kwargs["write_offset"], 153)
+        self.assertEqual(second_call.kwargs["preceding_segments"], ["first"])
+
+        verification[0]["write_offset"] = -153
+        verification[1]["write_offset"] = 0
+        with mock.patch.object(self.module, "segments_to_wav") as write:
+            self.module.verify_with_accuraterip(
+                [first, second], verification, Path("."), library=library
+            )
+        self.assertEqual(write.call_args_list[0].kwargs["write_offset"], 0)
+
+        verification[0]["write_offset"] = 0
+        verification[1]["write_offset"] = 153
+        with mock.patch.object(self.module, "segments_to_wav") as write:
+            self.module.verify_with_accuraterip(
+                [first, second], verification, Path("."), library=library
+            )
+        self.assertEqual(write.call_args_list[1].kwargs["write_offset"], 0)
     def setUp(self):
         self.module = importlib.reload(accuraterip)
 
