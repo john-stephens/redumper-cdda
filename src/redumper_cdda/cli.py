@@ -224,10 +224,9 @@ class CliApplication:
                 cdparanoia_toc_file=args.cdparanoia_toc_file,
             )
             if args.show_layout:
+                layout = application.read_layout(args.device or "-")
                 reporter.publish(
-                    LifecycleEvent(
-                        "disc_layout", application.read_layout(args.device or "-")
-                    )
+                    LifecycleEvent("disc_layout", layout)
                 )
                 return 0
             request = ExtractionRequest(

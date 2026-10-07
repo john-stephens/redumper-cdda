@@ -11,7 +11,7 @@ import sys
 import tempfile
 import wave
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 
@@ -21,6 +21,10 @@ if str(SOURCE) not in sys.path:
     sys.path.insert(0, str(SOURCE))
 
 from redumper_cdda.integrity import (  # noqa: E402
+    REDUMPER_ERROR_C2,
+    REDUMPER_ERROR_SKIP,
+    REDUMPER_LBA_START,
+    SAMPLES_PER_SECTOR,
     inspect_track_media_errors,
     parse_split_write_offsets,
     state_offset_for_lba,
@@ -32,6 +36,14 @@ DEFAULT_LAUNCHER = REPOSITORY / "redumper-cdda"
 PROJECT_PYTHON = REPOSITORY / ".venv" / "bin" / "python"
 PCM_BYTES_PER_SECTOR = 2352
 PCM_FRAMES_PER_SECTOR = 588
+PHYSICAL_PROFILES = (
+    "regular-audio",
+    "track0-pregap",
+    "data-first",
+    "data-last",
+    "data-only",
+    "audio-errors",
+)
 
 
 class ValidationError(RuntimeError):
@@ -56,9 +68,8 @@ class ValidationLog:
         self._stream.write(f"\n{separator}\nTEST: {name}\n{separator}\n")
         self._stream.flush()
 
-    def finish_test(self, name, passed):
+    def finish_test(self, name, result):
         separator = "-" * 80
-        result = "PASS" if passed else "FAIL"
         self._stream.write(
             f"\n{separator}\nTEST RESULT: {result} — {name}\n{separator}\n"
         )
@@ -89,6 +100,10 @@ class ValidationLog:
             self._stream.write("\n")
         self._stream.flush()
 
+    def record_skip(self, reason):
+        self._stream.write(f"\nSkip reason: {reason}\n")
+        self._stream.flush()
+
 
 @contextmanager
 def validation_test(validation_log, name):
@@ -106,12 +121,20 @@ def validation_test(validation_log, name):
     try:
         yield
     except BaseException:
-        validation_log.finish_test(name, passed=False)
+        validation_log.finish_test(name, "FAIL")
         print("FAIL", flush=True)
         raise
     else:
-        validation_log.finish_test(name, passed=True)
+        validation_log.finish_test(name, "PASS")
         print("PASS", flush=True)
+
+
+def skipped_test(validation_log, name, reason):
+    print(f"{name} ... SKIP ({reason})", flush=True)
+    if validation_log is not None:
+        validation_log.start_test(name)
+        validation_log.record_skip(reason)
+        validation_log.finish_test(name, "SKIP")
 
 
 def parser():
@@ -240,12 +263,6 @@ def load_manifests(test_data, requested=()):
         if any(item.get("status") != "complete" for item in scenarios):
             raise ValidationError(f"manifest contains an incomplete scenario: {path}")
         manifests.append((path.parent, manifest))
-    found = {manifest["profile"] for _directory, manifest in manifests}
-    missing = sorted(requested - found)
-    if missing:
-        raise ValidationError("captured profiles not found: " + ", ".join(missing))
-    if not manifests:
-        raise ValidationError(f"no captured profiles found under {test_data}")
     return manifests
 
 
@@ -354,6 +371,20 @@ def run_command(command, cwd, expect_success, validation_log=None):
         validation_log.record(command, cwd, result)
     if (result.returncode == 0) != expect_success:
         tail = "\n".join(result.stdout.splitlines()[-30:])
+        detail = next(
+            (
+                Path(str(item).removeprefix("--log-file="))
+                for item in command
+                if str(item).startswith("--log-file=")
+            ),
+            None,
+        )
+        if detail is not None and detail.is_file():
+            detail_tail = "\n".join(
+                detail.read_text(encoding="utf-8", errors="replace").splitlines()[-30:]
+            )
+            if detail_tail and detail_tail not in tail:
+                tail = f"{tail}\n\nExtraction log tail:\n{detail_tail}"
         expectation = "success" if expect_success else "failure"
         raise ValidationError(
             f"expected {expectation}, got status {result.returncode}: "
@@ -457,6 +488,46 @@ def assert_accuraterip(log_path, expected_results):
                 f"Track {number:02d} expected {expected}, got {actual}"
                 for number, expected, actual in mismatches
             )
+        )
+
+
+def assert_accuraterip_track(log_path, number, expected_status):
+    try:
+        output = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise ValidationError(f"could not read extraction log {log_path}: {exc}") from exc
+    match = re.search(
+        rf"^Track {number:02d}: (verified|not present in the database|no match)\b",
+        output,
+        re.MULTILINE,
+    )
+    if match is None or match.group(1) != expected_status:
+        actual = match.group(1) if match is not None else "missing"
+        raise ValidationError(
+            f"Track {number:02d} expected {expected_status}, got {actual}"
+        )
+
+
+def assert_required_write_offset(manifest, scenario, log_path):
+    required_sign = scenario.get("required_write_offset_sign", 0)
+    if not required_sign:
+        return
+    number = scenario["strict_accuraterip_track"]
+    try:
+        output = log_path.read_text(encoding="utf-8", errors="replace")
+        offsets = parse_split_write_offsets(output)
+        offset = state_offset_for_lba(
+            offsets, selected_track(manifest, number)["begin_lba"]
+        )
+    except (OSError, RuntimeError) as exc:
+        raise ValidationError(
+            f"could not determine required write offset from {log_path}: {exc}"
+        ) from exc
+    if offset == 0 or (offset > 0) != (required_sign > 0):
+        direction = "positive" if required_sign > 0 else "negative"
+        raise ValidationError(
+            f"Track {number:02d} requires a {direction} nonzero write offset; "
+            f"split reported {offset:+d}"
         )
 
 
@@ -697,6 +768,203 @@ def clean_tracks(manifest):
     }
 
 
+def strict_known_clean_tracks(manifest, scenario):
+    result = clean_tracks(manifest) & set(scenario["selected_tracks"])
+    fabricated = scenario.get("fabricated_c2_track")
+    if fabricated is not None:
+        result.discard(fabricated)
+    return result
+
+
+def layout_probe_scenario(manifest):
+    probe = manifest.get("write_offset_probe", {}).get("scenario")
+    if probe is not None:
+        for scenario in manifest["scenarios"]:
+            if scenario["name"] == probe:
+                return scenario
+    all_tracks = {track["number"] for track in manifest["layout"]["tracks"]}
+    for scenario in manifest["scenarios"]:
+        if set(scenario["selected_tracks"]) == all_tracks:
+            return scenario
+    return manifest["scenarios"][0]
+
+
+def probe_captured_write_offsets(
+    profile_dir, scenario, destination, validation_log=None
+):
+    source_prefix = safe_child(
+        profile_dir, scenario["existing_dump"], "existing dump"
+    )
+    destination.mkdir()
+    image_name = "offset-probe"
+    copied = 0
+    for source in source_prefix.parent.iterdir():
+        if source.is_file() and source.name.startswith(f"{source_prefix.name}."):
+            shutil.copy2(source, destination / f"{image_name}{source.suffix}")
+            copied += 1
+    if not copied:
+        raise ValidationError(f"no dump files found for {source_prefix}")
+    command = [
+        "redumper",
+        "split",
+        f"--image-path={destination}",
+        f"--image-name={image_name}",
+        "--force-split",
+    ]
+    if scenario.get("include_data"):
+        command.append("--filesystem-trim")
+    result = run_command(
+        command, destination, expect_success=True, validation_log=validation_log
+    )
+    try:
+        return [offset for _lba, offset in parse_split_write_offsets(result.stdout)]
+    except RuntimeError as exc:
+        raise ValidationError(
+            "could not determine captured automatic write offset"
+        ) from exc
+
+
+def validate_capture_write_offsets(manifest, observed_offsets=None):
+    profile = manifest["profile"]
+    if profile not in ("regular-audio", "data-last"):
+        return
+    try:
+        offsets = manifest["write_offset_probe"]["offsets"]
+        values = [int(item[1]) for item in offsets]
+    except (KeyError, TypeError, ValueError, IndexError):
+        values = list(observed_offsets or ())
+    if not values:
+        raise ValidationError(
+            f"{profile} capture lacks a valid automatic write-offset probe"
+        )
+    if profile == "regular-audio" and any(values):
+        raise ValidationError(
+            f"{profile} capture requires zero write offset; recorded {values}"
+        )
+    if profile == "data-last" and not any(offset < 0 for offset in values):
+        raise ValidationError(
+            "data-last capture requires a negative nonzero write offset"
+        )
+    if profile == "data-last":
+        regressions = [
+            scenario
+            for scenario in manifest["scenarios"]
+            if scenario.get("fabricated_c2_track") is not None
+        ]
+        if len(regressions) != 1:
+            raise ValidationError(
+                "data-last capture lacks the merged nonzero-offset regression"
+            )
+        regression = regressions[0]
+        target = regression.get("strict_accuraterip_track")
+        alignment = regression.get("fabricated_c2_track")
+        controls = [
+            scenario
+            for scenario in manifest["scenarios"]
+            if scenario.get("selected_tracks") == [target]
+            and not scenario.get("include_data", False)
+        ]
+        if (
+            target is None
+            or alignment != target + 1
+            or regression.get("omitted_alignment_track") != alignment
+            or regression.get("required_write_offset_sign") != -1
+            or not controls
+        ):
+            raise ValidationError(
+                "data-last capture lacks the merged nonzero-offset regression"
+            )
+
+
+def parity_candidates(scenario, outputs):
+    if not scenario.get("expected_media_errors", False):
+        return outputs
+    number = scenario.get("strict_accuraterip_track")
+    if number is not None and number in outputs:
+        return {number: outputs[number]}
+    return {}
+
+
+def record_track_parity(profile, candidates, baselines, baseline_dir=None):
+    """Compare candidates immediately, retaining at most one output per track."""
+    for number, output in candidates.items():
+        key = (profile, number)
+        baseline = baselines.get(key)
+        if baseline is not None:
+            validate_track_parity(profile, number, (baseline, output))
+            continue
+        if baseline_dir is not None:
+            baseline_dir.mkdir(parents=True, exist_ok=True)
+            retained = baseline_dir / f"track{number:02d}{output.path.suffix}"
+            output.path.replace(retained)
+            output = replace(output, path=retained)
+        baselines[key] = output
+
+
+def fabricate_c2_dump(profile_dir, manifest, scenario, destination, split_log):
+    source_prefix = safe_child(
+        profile_dir, scenario["existing_dump"], "existing dump"
+    )
+    destination.mkdir()
+    dump_dir = destination / "dump"
+    dump_dir.mkdir()
+    target_prefix = dump_dir / source_prefix.name
+    copied = 0
+    for source in source_prefix.parent.iterdir():
+        if source.is_file() and source.name.startswith(f"{source_prefix.name}."):
+            shutil.copy2(source, dump_dir / source.name)
+            copied += 1
+    if not copied:
+        raise ValidationError(f"no dump files found for {source_prefix}")
+    toc_source = safe_child(
+        profile_dir, scenario["cdparanoia_toc_file"], "cdparanoia TOC"
+    )
+    toc_target = destination / "cdparanoia-toc.txt"
+    shutil.copy2(toc_source, toc_target)
+
+    track_number = scenario["fabricated_c2_track"]
+    track = selected_track(manifest, track_number)
+    lba = track["begin_lba"] + track["length_sectors"] // 2
+    try:
+        offsets = parse_split_write_offsets(
+            split_log.read_text(encoding="utf-8", errors="replace")
+        )
+        sample_offset = state_offset_for_lba(offsets, lba)
+        file_sample = (
+            (lba - REDUMPER_LBA_START) * SAMPLES_PER_SECTOR + sample_offset
+        )
+        state_path = target_prefix.with_suffix(".state")
+        with state_path.open("r+b") as state:
+            state.seek(file_sample)
+            original = state.read(1)
+            if len(original) != 1:
+                raise ValidationError("fabricated C2 sample lies outside state file")
+            if original[0] in (REDUMPER_ERROR_SKIP, REDUMPER_ERROR_C2):
+                raise ValidationError(
+                    "data-last capture is not clean at fabricated C2 sample"
+                )
+            state.seek(file_sample)
+            state.write(bytes((REDUMPER_ERROR_C2,)))
+    except OSError as exc:
+        raise ValidationError(f"could not fabricate C2 state: {exc}") from exc
+
+    record = {
+        "kind": "synthetic C2 state; captured PCM is unchanged",
+        "track": track_number,
+        "lba": lba,
+        "state_file_sample": file_sample,
+        "original_state": original[0],
+        "fabricated_state": REDUMPER_ERROR_C2,
+    }
+    (destination / "fabricated-c2.json").write_text(
+        json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    derived = dict(scenario)
+    derived["existing_dump"] = str(target_prefix.relative_to(destination))
+    derived["cdparanoia_toc_file"] = toc_target.name
+    return destination, derived
+
+
 def validate_scenario(
     launcher, profile_dir, manifest, scenario, workdir, validation_log=None
 ):
@@ -778,11 +1046,29 @@ def validate_scenario(
                 f"invalid mixed single-file mode created output: {scenario['name']}"
             )
 
-    if scenario.get("expected_media_errors", False):
+    if scenario.get("expected_media_errors", False) or scenario.get(
+        "fabricated_c2_track"
+    ) is not None:
         strict_dir = scenario_dir / "strict"
         strict_dir.mkdir()
+        strict_profile_dir = profile_dir
+        strict_scenario = scenario
+        fabricated_track = scenario.get("fabricated_c2_track")
+        if fabricated_track is not None:
+            strict_profile_dir, strict_scenario = fabricate_c2_dump(
+                profile_dir,
+                manifest,
+                scenario,
+                strict_dir / "fabricated-source",
+                separate_dir / "validation.log",
+            )
         command = extraction_command(
-            launcher, profile_dir, scenario, strict_dir, abort_on_skip=True
+            launcher,
+            strict_profile_dir,
+            strict_scenario,
+            strict_dir,
+            abort_on_skip=True,
+            accuraterip=bool(scenario.get("strict_accuraterip_track")),
         )
         run_command(command, strict_dir, expect_success=False, validation_log=validation_log)
         actual = set(strict_dir.glob("*.wav")) | set(strict_dir.glob("*.iso"))
@@ -792,7 +1078,7 @@ def validate_scenario(
             raise ValidationError(
                 f"strict error policy did not omit affected output: {scenario['name']}"
             )
-        known_clean = clean_tracks(manifest) & set(scenario["selected_tracks"])
+        known_clean = strict_known_clean_tracks(manifest, scenario)
         clean_names = {
             f"track{number:02d}."
             f"{'wav' if selected_track(manifest, number)['kind'] == 'audio' else 'iso'}"
@@ -802,6 +1088,19 @@ def validate_scenario(
             raise ValidationError(
                 f"strict error policy omitted a known-clean track: {scenario['name']}"
             )
+        strict_track = scenario.get("strict_accuraterip_track")
+        if strict_track is not None:
+            required_name = f"track{strict_track:02d}.wav"
+            omitted_track = scenario["omitted_alignment_track"]
+            omitted_name = f"track{omitted_track:02d}.wav"
+            if required_name not in actual_names or omitted_name in actual_names:
+                raise ValidationError(
+                    "strict offset fixture did not retain the target while "
+                    "omitting its alignment neighbor"
+                )
+            strict_log = strict_dir / "validation.log"
+            assert_required_write_offset(manifest, scenario, strict_log)
+            assert_accuraterip_track(strict_log, strict_track, "verified")
         if len(tracks) > 1 and all_audio:
             strict_single_dir = scenario_dir / "strict-single"
             strict_single_dir.mkdir()
@@ -861,9 +1160,20 @@ def validate(args, validation_log=None):
     launcher = args.launcher.resolve()
     if not launcher.is_file() or not launcher.stat().st_mode & 0o111:
         raise ValidationError(f"launcher is not executable: {launcher}")
-    if shutil.which("redumper") is None:
+    manifests = load_manifests(
+        args.test_data.resolve(), args.profile or PHYSICAL_PROFILES
+    )
+    requested = set(args.profile or PHYSICAL_PROFILES)
+    found = {manifest["profile"] for _directory, manifest in manifests}
+    missing = sorted(requested - found)
+    for profile in missing:
+        skipped_test(
+            validation_log,
+            f"[{profile}] captured test cases",
+            "no data available",
+        )
+    if manifests and shutil.which("redumper") is None:
         raise ValidationError("redumper not found; offline splitting still requires it")
-    manifests = load_manifests(args.test_data.resolve(), args.profile)
     source_hashes = {}
     if not args.skip_source_hashes:
         print("Verifying captured source hashes...", flush=True)
@@ -878,7 +1188,7 @@ def validate(args, validation_log=None):
             with validation_test(validation_log, f"[{profile}] layout"):
                 layout_dir = workdir / profile / "layout"
                 layout_dir.mkdir(parents=True)
-                layout_scenario = manifest["scenarios"][0]
+                layout_scenario = layout_probe_scenario(manifest)
                 command = extraction_command(
                     launcher,
                     profile_dir,
@@ -898,6 +1208,18 @@ def validate(args, validation_log=None):
                         raise ValidationError(
                             f"layout output omits Track {track['number']:02d}: {profile}"
                         )
+                observed_offsets = None
+                if (
+                    profile in ("regular-audio", "data-last")
+                    and "write_offset_probe" not in manifest
+                ):
+                    observed_offsets = probe_captured_write_offsets(
+                        profile_dir,
+                        layout_scenario,
+                        layout_dir / "offset-probe",
+                        validation_log,
+                    )
+                validate_capture_write_offsets(manifest, observed_offsets)
 
             for scenario in manifest["scenarios"]:
                 test_name = f"[{profile}] {scenario['name']}"
@@ -910,12 +1232,18 @@ def validate(args, validation_log=None):
                         workdir / profile,
                         validation_log,
                     )
-                    if not scenario.get("expected_media_errors", False):
-                        for number, output in outputs.items():
-                            parity.setdefault((profile, number), []).append(output)
-
-        for (profile, number), outputs in parity.items():
-            validate_track_parity(profile, number, outputs)
+                    record_track_parity(
+                        profile,
+                        parity_candidates(scenario, outputs),
+                        parity,
+                        (
+                            workdir / profile / "parity-baselines"
+                            if args.keep_work is None
+                            else None
+                        ),
+                    )
+                    if args.keep_work is None:
+                        shutil.rmtree(workdir / profile / scenario["name"])
 
     if not args.skip_source_hashes:
         print("\nRechecking captured source hashes...", flush=True)
@@ -926,7 +1254,8 @@ def validate(args, validation_log=None):
                     f"captured checksum manifest changed: {profile_dir.name}"
                 )
     print(
-        f"\nPASS: validated {len(manifests)} captured profile(s) without media",
+        f"\nPASS: validated {len(manifests)} captured profile(s) without media; "
+        f"skipped {len(missing)} profile(s)",
         flush=True,
     )
 

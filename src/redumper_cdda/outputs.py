@@ -54,6 +54,7 @@ def segments_to_wav(
     write_offset=0,
     preceding_segments=(),
     following_segments=(),
+    trailing_silence_frames=0,
 ):
     total_sectors = sum(
         segment["sectors"]
@@ -130,7 +131,13 @@ def segments_to_wav(
         segment["sectors"] * FRAMES_PER_SECTOR
         for segment in all_segments
     )
-    if start_frame < 0 or start_frame + output_frames > available_frames:
+    source_frames = output_frames - trailing_silence_frames
+    if (
+        trailing_silence_frames < 0
+        or source_frames < 0
+        or start_frame < 0
+        or start_frame + source_frames > available_frames
+    ):
         raise RuntimeError(
             "Insufficient adjacent split AUDIO data for AccurateRip alignment."
         )
@@ -145,5 +152,9 @@ def segments_to_wav(
         dst.setframerate(SAMPLE_RATE)
 
         _write_segment_window(
-            dst, all_segments, start_frame, output_frames
+            dst, all_segments, start_frame, source_frames
         )
+        if trailing_silence_frames:
+            dst.writeframesraw(
+                b"\0" * trailing_silence_frames * BYTES_PER_FRAME
+            )

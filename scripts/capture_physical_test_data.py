@@ -7,6 +7,7 @@ import json
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib import metadata
@@ -25,6 +26,7 @@ from redumper_cdda.adapters.layout_provider import (  # noqa: E402
 from redumper_cdda.adapters.mmc import MmcTocReader  # noqa: E402
 from redumper_cdda.adapters.redumper import RedumperCommandFactory  # noqa: E402
 from redumper_cdda.adapters.subprocess_runner import SubprocessRunner  # noqa: E402
+from redumper_cdda.adapters.workspace import Workspace  # noqa: E402
 from redumper_cdda.application.output import OutputPlanner  # noqa: E402
 from redumper_cdda.application.planning import ExtractionPlanner  # noqa: E402
 from redumper_cdda.domain.disc import TrackKind  # noqa: E402
@@ -32,7 +34,10 @@ from redumper_cdda.domain.extraction import (  # noqa: E402
     ExtractionRequest,
     TrackSelection,
 )
-from redumper_cdda.integrity import parse_media_errors  # noqa: E402
+from redumper_cdda.integrity import (  # noqa: E402
+    parse_media_errors,
+    parse_split_write_offsets,
+)
 
 
 PROFILES = (
@@ -44,6 +49,10 @@ PROFILES = (
     "audio-errors",
 )
 REQUIRED_DUMP_SUFFIXES = (".state", ".subcode", ".toc", ".fulltoc")
+OFFSET_PROBE_SCENARIOS = {
+    "regular-audio": "a03-a04-all-audio",
+    "data-last": "d05-all-tracks",
+}
 
 
 class CaptureError(RuntimeError):
@@ -62,6 +71,10 @@ class Scenario:
     selection: TrackSelection
     include_data: bool = False
     expect_errors: bool = False
+    strict_accuraterip_track: object = None
+    required_write_offset_sign: int = 0
+    omitted_alignment_track: object = None
+    fabricated_c2_track: object = None
 
 
 def now():
@@ -95,19 +108,19 @@ def parser():
         "--clean-track",
         type=positive_int,
         metavar="N",
-        help="known-clean audio track for the audio-errors profile",
+        help="known-clean audio track for audio-errors",
     )
     result.add_argument(
         "--error-track",
         type=positive_int,
         metavar="N",
-        help="known-damaged audio track for the audio-errors profile",
+        help="known-damaged audio track for audio-errors",
     )
     result.add_argument(
         "--error-range",
         type=bounded_track_range,
         metavar="N-M",
-        help="audio range containing both clean and damaged tracks",
+        help="all-audio range containing both designated audio tracks",
     )
     return result
 
@@ -147,7 +160,8 @@ def validate_profile_options(args):
     if args.profile == "audio-errors":
         if any(value is None for value in error_options):
             raise CaptureError(
-                "audio-errors requires --clean-track, --error-track, and --error-range"
+                f"{args.profile} requires --clean-track, --error-track, "
+                "and --error-range"
             )
     elif any(value is not None for value in error_options):
         raise CaptureError(
@@ -284,14 +298,21 @@ def scenarios_for(
         )
     if profile == "data-last":
         if (
-            len(tracks) < 2
+            len(tracks) < 3
             or tracks[-1].kind is not TrackKind.DATA
             or any(track.kind is not TrackKind.AUDIO for track in tracks[:-1])
         ):
             raise CaptureError(
-                "data-last requires audio tracks followed by one final data track"
+                "data-last requires at least two audio tracks followed by one "
+                "final data track"
             )
-        return (
+        offset_target = tracks[-3].number
+        result = (
+            Scenario(
+                "d01-offset-control",
+                ("D08", "D11 control"),
+                TrackSelection(offset_target, offset_target),
+            ),
             Scenario("d02-final-audio", ("D02", "D06 D02"), TrackSelection(final_audio, final_audio)),
             Scenario("d03-all-audio", ("D03",), TrackSelection()),
             Scenario(
@@ -302,9 +323,13 @@ def scenarios_for(
             ),
             Scenario(
                 "d05-all-tracks",
-                ("D05", "D06 D05"),
+                ("D05", "D06 D05", "D09", "D10", "D11 range", "D12"),
                 TrackSelection(),
                 True,
+                strict_accuraterip_track=offset_target,
+                required_write_offset_sign=-1,
+                omitted_alignment_track=final_audio,
+                fabricated_c2_track=final_audio,
             ),
             Scenario(
                 "d07-final-data-track",
@@ -313,6 +338,7 @@ def scenarios_for(
                 True,
             ),
         )
+        return result
     if profile == "data-only":
         if any(track.kind is not TrackKind.DATA for track in tracks):
             raise CaptureError("data-only requires a disc containing only data tracks")
@@ -399,6 +425,14 @@ def request_for(device, scenario, retries):
     )
 
 
+def capture_order(profile, scenarios):
+    probe_name = OFFSET_PROBE_SCENARIOS.get(profile)
+    if probe_name is None:
+        return scenarios
+    probe = next(item for item in scenarios if item.name == probe_name)
+    return (probe,) + tuple(item for item in scenarios if item is not probe)
+
+
 def layout_record(disc):
     return {
         "lead_out_lba": disc.lead_out_lba,
@@ -456,6 +490,61 @@ def validate_expected_errors(log_path, expect_errors):
             "clean-control scenario unexpectedly retained SCSI or C2 errors"
         )
     return errors
+
+
+def probe_write_offsets(
+    source_prefix,
+    include_data,
+    log_path,
+    run=subprocess.run,
+    temporary_directory=tempfile.TemporaryDirectory,
+):
+    with temporary_directory(prefix="redumper-cdda-offset-probe-") as value:
+        workdir = Path(value)
+        image_name = "offset-probe"
+        Workspace(workdir).stage_existing_dump(source_prefix, image_name)
+        command = [
+            "redumper",
+            "split",
+            f"--image-path={workdir}",
+            f"--image-name={image_name}",
+            "--force-split",
+        ]
+        if include_data:
+            command.append("--filesystem-trim")
+        result = run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        log_path.write_bytes(result.stdout)
+        if result.returncode != 0:
+            raise CaptureError(
+                "automatic write-offset probe failed with status "
+                f"{result.returncode}"
+            )
+        try:
+            offsets = parse_split_write_offsets(
+                result.stdout.decode("utf-8", errors="replace")
+            )
+        except RuntimeError as exc:
+            raise CaptureError(
+                f"could not determine automatic split write offset: {exc}"
+            ) from exc
+    return tuple(offsets), tuple(command)
+
+
+def validate_profile_write_offsets(profile, offsets):
+    values = [offset for _lba, offset in offsets]
+    if profile == "regular-audio" and any(values):
+        raise CaptureError(
+            f"{profile} requires an automatic split write offset of zero; "
+            f"redumper reported {values}"
+        )
+    if profile == "data-last" and not any(offset < 0 for offset in values):
+        raise CaptureError(
+            "data-last requires a negative nonzero automatic split write offset"
+        )
 
 
 def sha256_file(path):
@@ -596,7 +685,7 @@ def capture(args):
             error_range=args.error_range,
             clean_track=args.clean_track,
         )
-        for scenario in scenarios:
+        for scenario in capture_order(args.profile, scenarios):
             scenario_dir = destination / scenario.name
             scenario_dir.mkdir()
             plan = planner.create(
@@ -625,6 +714,10 @@ def capture(args):
                 "dump_start_lba": plan.dump_start_lba,
                 "dump_end_lba": plan.dump_end_lba,
                 "expected_media_errors": scenario.expect_errors,
+                "strict_accuraterip_track": scenario.strict_accuraterip_track,
+                "required_write_offset_sign": scenario.required_write_offset_sign,
+                "omitted_alignment_track": scenario.omitted_alignment_track,
+                "fabricated_c2_track": scenario.fabricated_c2_track,
                 "status": "incomplete",
             }
             manifest["scenarios"].append(scenario_record)
@@ -650,6 +743,21 @@ def capture(args):
                     f"redumper TOCs for {scenario.name} differ from the live layout"
                 )
             scenario_record["status"] = "complete"
+            probe_name = OFFSET_PROBE_SCENARIOS.get(args.profile)
+            if scenario.name == probe_name:
+                probe_log = destination / "write-offset-probe.log"
+                offsets, command = probe_write_offsets(
+                    prefix,
+                    scenario.include_data,
+                    probe_log,
+                )
+                validate_profile_write_offsets(args.profile, offsets)
+                manifest["write_offset_probe"] = {
+                    "scenario": probe_name,
+                    "command": list(command),
+                    "output": probe_log.name,
+                    "offsets": [list(item) for item in offsets],
+                }
 
         manifest["status"] = "complete"
         manifest["completed_at"] = now()

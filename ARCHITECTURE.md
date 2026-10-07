@@ -98,6 +98,19 @@ optional AccurateRip verification
 typed ExtractionResult
 ```
 
+Split source resolution distinguishes final output permission from temporary
+verification support. Under per-track `--abort-on-skip`, an omitted adjacent
+audio track may still supply read-only boundary frames needed to undo a
+nonzero split write offset for a retained track's AccurateRip checksum. That
+source never becomes a `ResolvedOutput` and is neither committed nor reported
+as retained. When the final audio track has a negative write offset and no
+following AUDIO BIN frames, the AccurateRip-only WAV may zero-fill the missing
+tail strictly within AccurateRip's excluded final five sectors. Production
+outputs are never padded or shifted.
+
+Layout-only inspection reads and reports reconciled TOCs without acquisition
+or splitting.
+
 With `--existing-dump`, the workspace adapter first copies the primary dump
 artifact set under the planned image name. The coordinator bypasses the
 acquisition service and proceeds directly to splitting. Split's write-offset

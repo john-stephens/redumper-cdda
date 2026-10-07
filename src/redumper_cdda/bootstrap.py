@@ -51,6 +51,7 @@ def create_application(
     integrity = RedumperIntegrityParser(parse_media_errors, parse_split_write_offsets)
     cue_parser = CueSheetParser()
     conversion_output = _conversion_output(reporter)
+    workspace_factory = TemporaryWorkspaceFactory(reporter)
     return ExtractionApplication(
         layout_provider=layout_provider,
         planner=ExtractionPlanner(OutputPlanner(), RedumperCommandFactory),
@@ -73,7 +74,7 @@ def create_application(
             reporter,
         ),
         verifier_factory=_verifier,
-        workspace_factory=TemporaryWorkspaceFactory(reporter),
+        workspace_factory=workspace_factory,
         reporter=reporter,
     )
 

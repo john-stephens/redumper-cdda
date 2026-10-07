@@ -6,8 +6,9 @@ conditions and layouts:
 1. regular audio CD;
 2. audio CD with a Track 1 pregap containing hidden Track 0 audio;
 3. audio CD with a data track first;
-4. audio CD with a data track last;
-5. data-only CD; and
+4. clean enhanced CD with a data track last, a nonzero split offset, and two
+   adjacent clean audio tracks used for a synthetic strict-policy regression;
+5. data-only CD;
 6. audio CD with a known-clean track and a track with repeatable SCSI or C2
    errors.
 
@@ -46,6 +47,21 @@ contains both. The profile uses zero retries by default and rejects captures
 unless the control is clean and both damaged scenarios retain SCSI or C2
 errors.
 
+For `data-last`, use an enhanced CD whose final track is data. The script
+automatically uses the final two audio tracks as clean target Track `C` and
+following alignment Track `N`, then captures the full numbered-track range
+through data Track `D`. Its mixed split must report a nonzero offset.
+
+Capture performs automatic-offset probes on disposable copies of the complete
+regular-audio and data-last ranges. The regular-audio profile requires zero;
+the data-last profile requires a negative nonzero offset. Probe commands never use
+`--force-offset=0`; their output and parsed
+LBA/offset mapping are stored in the capture manifest while derived CUE/BIN
+files are discarded. Each probe scenario is captured first and checked
+immediately, before any remaining scenarios are acquired. Do not replace the
+complete probe with a smaller audio/data range: redumper may infer a different
+offset for that bounded selection.
+
 After all profiles have been captured, run every media-free case with:
 
 ``` bash
@@ -55,6 +71,8 @@ After all profiles have been captured, run every media-free case with:
 The validator reads only the capture manifests and dump files, creates outputs
 in temporary storage, and rechecks every source hash afterward. It requires
 redumper for splitting but does not require or access an optical device.
+Profiles for which no capture data exists are reported as skipped; invalid or
+incomplete data that is present remains a failure.
 
 ## Test records and common validation
 
@@ -622,6 +640,66 @@ command exits nonzero.
 
 Repeat F09 with `--single-file`. Expected: the unresolved SCSI/C2 state rejects
 the combined output and no final WAV is created.
+
+## D (continued). Nonzero-offset strict AccurateRip regression
+
+Use a clean enhanced CD with a final data track and two clean audio tracks: an
+AccurateRip-verifiable Track `C` and alignment Track `N` immediately after it.
+The mixed range `R-D` must include both tracks and the final data track. The
+capture script derives these tracks and the full range directly from the disc
+layout. The split must report a nonzero write offset when data is included.
+
+### D08 - Clean single-track control
+
+``` bash
+redumper-cdda /dev/sg4 C --retries=100 --log-file=D08.log
+```
+
+Expected: the audio-only split forces offset zero, Track `C` has no unresolved
+SCSI/C2 state, and AccurateRip verifies it.
+
+### D09 - Mixed-range nonzero offset
+
+``` bash
+redumper-cdda /dev/sg4 R-D --include-data --retries=100 --log-file=D09.log
+```
+
+Expected: one dump and one split run, the split reports a negative nonzero
+write offset, and Track `C` has the same AccurateRip result as D08 after
+checksum-only alignment.
+
+### D10 - Strict omission keeps alignment PCM
+
+Run the offline validator after capturing the clean profile:
+
+``` bash
+./scripts/validate_physical_test_data.py \
+  --profile=data-last --log-file=D10.log
+```
+
+The validator copies the mixed dump and changes one state byte in the middle
+of Track `N` to redumper's unresolved C2 value before its strict-policy run.
+PCM is not changed, and the source dump remains hash-identical. Expected:
+
+-   the strict extraction exits nonzero because the synthetically flagged
+    output is omitted;
+-   clean Track `C` is retained and synthetically flagged Track `N` is omitted;
+-   Track `N` remains available only inside the temporary workspace as the
+    following alignment source for the negative checksum window;
+-   only Track `C`, not omitted Track `N`, is submitted to AccurateRip; and
+-   Track `C` verifies exactly as it did in D08.
+
+### D11 - Cross-range PCM comparison
+
+Compare Track `C` from D08 and D09 over their common frame window after using
+the split-reported write offset. Every shared frame must match. Both WAVs must
+still contain exactly `track.length * 2352` PCM bytes.
+
+### D12 - Imported-dump regression
+
+D10 uses the clean offset-control and full-range `data-last` dumps. Expected: no
+dump or refine runs, each extraction splits exactly once, D10 still verifies
+Track `C`, and all source hashes remain unchanged.
 
 ## Acceptance criteria
 

@@ -151,9 +151,9 @@ redumper-cdda 2 \
 
 The track selection remains optional, so omitting `2` selects the normal
 full-disc range. Offline extraction still requires `redumper` for splitting,
-while
-offline layout display does not require `redumper`, `sg_raw`, or `cdparanoia`.
-File read errors, malformed TOCs, and reconciliation disagreements fail closed.
+while offline layout display does not require redumper, `sg_raw`, or
+cdparanoia. File read errors, malformed TOCs, and reconciliation disagreements
+fail closed.
 
 ### Building the physical-test corpus
 
@@ -177,16 +177,38 @@ the disc is changed. Dumps are scenario-sized: their LBA ranges match the
 selection in the physical test plan and include the required one-sector ending
 padding. Packaging variants that have the same physical range share one dump;
 invalid cases that must fail before acquisition do not create a dump. The
-script does not refine or split the captured data.
+script does not refine the captured data. For `regular-audio` and `data-last`,
+it performs one disposable automatic-offset split on a copy of the applicable
+dump, records the result in `write-offset-probe.log` and the manifest, then
+removes all derived probe files.
+
+For those offset-gated profiles, the complete or mixed probe scenario is
+captured first and checked immediately. An unsuitable disc therefore fails
+before any of the remaining scenario dumps are started. The complete range is
+intentional: a smaller audio/data range can produce a different inferred
+offset and is not accepted as a substitute for the capture being validated.
 
 The `audio-errors` profile requires a known-clean audio track, a known-damaged
 audio track, and a contiguous all-audio range containing both. It captures a
 clean control, the damaged track alone, and the mixed range. Its default is
-`--retries=0`, while the other profiles default to `--retries=100`. The script
-fails unless the clean control finishes at SCSI/C2 `0/0` and both damaged
+`--retries=0`; the other profiles default to `--retries=100`. The script fails
+unless the clean control finishes at SCSI/C2 `0/0` and both damaged
 captures retain a nonzero SCSI or C2 count. This makes the resulting fixtures
 useful for deterministic offline error-policy tests. Override `--retries` when
 a particular physical test requires another initial-read policy.
+
+The `data-last` profile uses a clean enhanced CD whose final track is data. It
+automatically uses the final two audio tracks as the AccurateRip target and
+its following alignment track. Offline validation fabricates one C2 state in
+a disposable copy of the alignment track's `.state` file, confirms strict
+mode omits that track, and still requires the retained target to verify using
+the unchanged adjacent PCM. The fabricated state is recorded and never
+written to the captured source corpus.
+
+The `regular-audio` capture is accepted only when every automatic split region
+has zero write offset. The `data-last` capture requires a negative nonzero
+automatic write offset needed by the following-track alignment regression.
+These checks do not use `--force-offset=0`.
 
 For the data-only profile, cdparanoia is deliberately not queried because the
 MMC layout contains no audio tracks; the saved TOC text records that fact and
@@ -213,6 +235,8 @@ After capture, run the complete media-free validation suite with:
 
 The validator discovers profiles and scenarios from their `manifest.json`
 files; it does not encode particular discs, track counts, or captured paths.
+Profiles with no captured data are reported as skipped. Present but incomplete,
+malformed, or nonconforming captures still fail validation.
 It verifies `SHA256SUMS` before and after the run, displays every stored layout,
 and extracts every scenario through `--existing-dump` and
 `--cdparanoia-toc-file`. It confirms that no dump or refine command ran, each
@@ -399,7 +423,9 @@ AccurateRip verification uses the complete MMC disc layout to identify the
 pressing even when only part of the disc is selected. Track 0 and data tracks
 are not tracked by AccurateRip. For mixed audio/data selections, checksum-only
 WAVs account for redumper's reported split write offset using adjacent audio;
-the completed WAV files are not shifted or changed. A database miss, network
+for a final enhanced-CD audio track, any unavailable tail frames are zero-filled
+only inside AccurateRip's excluded final five sectors. The completed WAV files
+are not shifted or changed. A database miss, network
 failure, or checksum mismatch does not delete completed output, and AccurateRip
 results do not replace the separate redumper SCSI/C2 integrity status. A
 data-only selection is extracted normally and automatically skips AccurateRip;
@@ -426,12 +452,15 @@ For every audio track, the default output is `trackNN.wav`. With
 For one data track selected with `--include-data`, the default output is
 `trackNN.iso`, or `PREFIXNN.iso` when `--prefix` is used.
 
-To inspect the complete audio/data track layout without dumping anything,
+To inspect the complete audio/data track layout without acquiring sectors,
 omit the track number and use:
 
 ``` bash
 redumper-cdda /dev/sg4 --show-layout
 ```
+
+The command reads and reports the reconciled TOCs only; it does not acquire or
+split sectors.
 
 ## Extraction details
 

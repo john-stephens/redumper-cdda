@@ -41,7 +41,7 @@ class SplitServiceTests(unittest.TestCase):
         redumper = mock.Mock()
         redumper.split.return_value = CommandResult((), 0, "split")
         resolver = mock.Mock()
-        segment = AudioSegment(Path("audio.bin"), 1, 0, 10, 10)
+        segment = AudioSegment(Path("audio.bin"), 1, 0, 10, 11)
         resolver.resolve.return_value = ((segment,), Path("disc.cue"), 0)
         parser = mock.Mock()
         parser.write_offsets.return_value = WriteOffsetMap(((0, -153),))
@@ -65,7 +65,27 @@ class SplitServiceTests(unittest.TestCase):
         self.assertEqual(result.outputs[0].audio_segments, (segment,))
         self.assertEqual(result.verification_tracks[0].track, track)
         self.assertEqual(result.verification_tracks[0].write_offset, -153)
-        redumper.split.assert_called_once_with(plan)
+        self.assertEqual(
+            result.verification_tracks[0].following_audio_segments,
+            (AudioSegment(Path("audio.bin"), 1, 10, 1, 11),),
+        )
+        resolver.resolve.return_value = (
+            (AudioSegment(Path("audio.bin"), 1, 0, 10, 10),),
+            Path("disc.cue"),
+            0,
+        )
+        result = service.split(
+            plan,
+            request,
+            acquisition,
+            before={},
+            changed_files=lambda _before: [Path("disc.cue")],
+        )
+        self.assertEqual(
+            result.verification_tracks[0].following_audio_segments, ()
+        )
+        self.assertEqual(redumper.split.call_count, 2)
+        redumper.split.assert_called_with(plan)
 
     def test_split_failure_and_integrity_parser_failure(self):
         plan = SimpleNamespace(outputs=())
@@ -119,6 +139,114 @@ class SplitServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(IntegrityStatusError, "every selected"):
             service.split(plan, request, acquisition, {}, lambda _before: [])
 
+    def test_omitted_audio_remains_available_for_accuraterip_alignment(self):
+        clean_track = Track(7, TrackKind.AUDIO, 0, 100, 110)
+        omitted_neighbor = Track(8, TrackKind.AUDIO, 0, 110, 120)
+        outputs = tuple(
+            OutputPlan(track, OutputKind.AUDIO, (track,), 10, Path(f"{track.number}"))
+            for track in (clean_track, omitted_neighbor)
+        )
+        plan = SimpleNamespace(
+            outputs=outputs,
+            workdir=Path("/work"),
+            image_name="tracks07-08",
+            selection=SimpleNamespace(
+                tracks=(clean_track, omitted_neighbor), first_track=clean_track
+            ),
+        )
+        request = SimpleNamespace(
+            abort_on_skip=True, single_file=False, accuraterip=True
+        )
+        acquisition = SimpleNamespace(media_errors=MediaErrors(0, 1, 0))
+        offsets = WriteOffsetMap(((0, -12),))
+        parser = mock.Mock()
+        parser.write_offsets.return_value = offsets
+        inspector = mock.Mock()
+        inspector.inspect.return_value = {
+            7: TrackMediaErrors(0, 0, 0, 0),
+            8: TrackMediaErrors(0, 1, 0, 1),
+        }
+        segments = {
+            7: AudioSegment(Path("seven.bin"), 7, 0, 10, 10),
+            8: AudioSegment(Path("eight.bin"), 8, 0, 10, 10),
+        }
+        audio = mock.Mock()
+        audio.resolve.side_effect = lambda *_args, **kwargs: (
+            (segments[_args[3]],), Path("disc.cue"), 0
+        )
+        service, _redumper = self.service(
+            audio=audio, parser=parser, inspector=inspector
+        )
+
+        result = service.split(plan, request, acquisition, {}, lambda _before: [])
+
+        self.assertEqual([item.plan.track.number for item in result.outputs], [7])
+        self.assertEqual([item.plan.track.number for item in result.omitted], [8])
+        self.assertEqual(len(result.verification_tracks), 1)
+        verification = result.verification_tracks[0]
+        self.assertEqual(verification.track, clean_track)
+        self.assertEqual(verification.write_offset, -12)
+        self.assertEqual(
+            verification.following_audio_segments, (segments[8],)
+        )
+
+        parser.write_offsets.return_value = WriteOffsetMap(((0, -12), (110, 0)))
+        result = service.split(plan, request, acquisition, {}, lambda _before: [])
+        self.assertEqual(
+            result.verification_tracks[0].following_audio_segments, ()
+        )
+
+    def test_omitted_preceding_audio_supports_positive_offset_alignment(self):
+        omitted_neighbor = Track(7, TrackKind.AUDIO, 0, 100, 110)
+        clean_track = Track(8, TrackKind.AUDIO, 0, 110, 120)
+        outputs = tuple(
+            OutputPlan(track, OutputKind.AUDIO, (track,), 10, Path(f"{track.number}"))
+            for track in (omitted_neighbor, clean_track)
+        )
+        plan = SimpleNamespace(
+            outputs=outputs,
+            workdir=Path("/work"),
+            image_name="tracks07-08",
+            selection=SimpleNamespace(
+                tracks=(omitted_neighbor, clean_track), first_track=omitted_neighbor
+            ),
+        )
+        request = SimpleNamespace(
+            abort_on_skip=True, single_file=False, accuraterip=True
+        )
+        acquisition = SimpleNamespace(media_errors=MediaErrors(0, 1, 0))
+        parser = mock.Mock()
+        parser.write_offsets.return_value = WriteOffsetMap(((0, 12),))
+        inspector = mock.Mock()
+        inspector.inspect.return_value = {
+            7: TrackMediaErrors(0, 1, 0, 1),
+            8: TrackMediaErrors(0, 0, 0, 0),
+        }
+        segments = {
+            number: AudioSegment(Path(f"{number}.bin"), number, 0, 10, 10)
+            for number in (7, 8)
+        }
+        audio = mock.Mock()
+        audio.resolve.side_effect = lambda *_args, **kwargs: (
+            (segments[_args[3]],), Path("disc.cue"), 0
+        )
+        service, _redumper = self.service(
+            audio=audio, parser=parser, inspector=inspector
+        )
+
+        result = service.split(plan, request, acquisition, {}, lambda _before: [])
+
+        self.assertEqual(
+            result.verification_tracks[0].preceding_audio_segments,
+            (segments[7],),
+        )
+
+        parser.write_offsets.return_value = WriteOffsetMap(((0, 0), (110, 12)))
+        result = service.split(plan, request, acquisition, {}, lambda _before: [])
+        self.assertEqual(
+            result.verification_tracks[0].preceding_audio_segments, ()
+        )
+
     def test_resolves_data_track_and_track_zero_audio(self):
         zero = Track(0, TrackKind.AUDIO, 0, 0, 5)
         data_track = Track(2, TrackKind.DATA, 4, 5, 10)
@@ -157,7 +285,9 @@ class SplitServiceTests(unittest.TestCase):
             ((AudioSegment(Path("one"), 1, 2, 5, 7),), Path("one.cue"), 2),
             ((AudioSegment(Path("two"), 2, 0, 5, 5),), Path("two.cue"), 0),
         )
-        service, _redumper = self.service(audio=audio)
+        parser = mock.Mock()
+        parser.write_offsets.return_value = WriteOffsetMap(((0, 0),))
+        service, _redumper = self.service(audio=audio, parser=parser)
         result = service.split(plan, request, acquisition, {}, lambda _before: [])
         self.assertEqual(result.outputs[0].pregap_skipped, 2)
         self.assertEqual(result.outputs[0].cue_path, Path("two.cue"))

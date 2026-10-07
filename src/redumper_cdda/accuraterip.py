@@ -221,20 +221,36 @@ def verify_with_accuraterip(
         write_offset = item.get("write_offset", 0)
         preceding_segments = ()
         following_segments = ()
+        trailing_silence_frames = 0
         if write_offset > 0 and audio_index > 1:
-            previous = requested_by_number.get(
-                audio_tracks[audio_index - 2]["number"]
-            )
-            if previous is not None and previous.get("write_offset", 0) == write_offset:
+            supplied = item.get("preceding_segments")
+            previous = requested_by_number.get(audio_tracks[audio_index - 2]["number"])
+            if supplied:
+                preceding_segments = supplied
+            elif supplied is None and previous is not None and previous.get(
+                "write_offset", 0
+            ) == write_offset:
                 preceding_segments = previous["segments"]
             else:
                 write_offset = 0
-        elif write_offset < 0 and audio_index < len(audio_tracks):
-            following = requested_by_number.get(
-                audio_tracks[audio_index]["number"]
+        elif write_offset < 0:
+            supplied = item.get("following_segments")
+            following = (
+                requested_by_number.get(audio_tracks[audio_index]["number"])
+                if audio_index < len(audio_tracks)
+                else None
             )
-            if following is not None and following.get("write_offset", 0) == write_offset:
+            if supplied:
+                following_segments = supplied
+            elif supplied is None and following is not None and following.get(
+                "write_offset", 0
+            ) == write_offset:
                 following_segments = following["segments"]
+            elif (
+                audio_index == len(audio_tracks)
+                and -write_offset <= 5 * 588
+            ):
+                trailing_silence_frames = -write_offset
             else:
                 write_offset = 0
         elif write_offset != 0:
@@ -247,6 +263,7 @@ def verify_with_accuraterip(
             write_offset=write_offset,
             preceding_segments=preceding_segments,
             following_segments=following_segments,
+            trailing_silence_frames=trailing_silence_frames,
         )
 
         try:

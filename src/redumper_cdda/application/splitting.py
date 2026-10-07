@@ -1,9 +1,13 @@
 """Forced partial-image splitting and immutable source resolution."""
 
+from math import ceil
+
+from ..domain.disc import TrackKind
 from ..domain.errors import IntegrityStatusError, SplitError
 from ..domain.events import LifecycleEvent
 from ..domain.integrity import MediaErrors
 from ..domain.outputs import (
+    AudioSegment,
     OmittedOutput,
     OutputKind,
     ResolvedOutput,
@@ -162,7 +166,20 @@ class SplitService:
             else None
         )
         outputs = []
-        verification = []
+        resolved_audio = {}
+
+        def resolve_audio(track):
+            if track.number not in resolved_audio:
+                resolved_audio[track.number] = self._audio_resolver.resolve(
+                    plan.workdir,
+                    plan.image_name,
+                    changed,
+                    track.number,
+                    track.length_sectors,
+                    track_zero_sectors=track_zero_sectors,
+                )
+            return resolved_audio[track.number]
+
         for output in output_plans:
             if output.kind is OutputKind.DATA:
                 source = self._data_resolver.resolve(
@@ -184,27 +201,79 @@ class SplitService:
             cue_path = None
             pregap = None
             for track in output.component_tracks:
-                component, cue_path, skipped = self._audio_resolver.resolve(
-                    plan.workdir,
-                    plan.image_name,
-                    changed,
-                    track.number,
-                    track.length_sectors,
-                    track_zero_sectors=track_zero_sectors,
-                )
+                component, cue_path, skipped = resolve_audio(track)
                 segments.extend(component)
-                if accuraterip and track.number != 0:
-                    write_offset = (
-                        verification_offsets.offset_for_lba(track.begin_lba)
-                        if verification_offsets is not None
-                        else 0
-                    )
-                    verification.append(
-                        VerificationTrack(track, component, write_offset)
-                    )
                 if pregap is None:
                     pregap = skipped
             outputs.append(
                 ResolvedOutput(output, tuple(segments), None, cue_path, pregap)
             )
+
+        verification = []
+        if accuraterip:
+            selected_audio = tuple(
+                track
+                for track in plan.selection.tracks
+                if track.number != 0 and track.kind is TrackKind.AUDIO
+            )
+            selected_indexes = {
+                track.number: index for index, track in enumerate(selected_audio)
+            }
+            verification_tracks = (
+                track
+                for output in output_plans
+                if output.kind is OutputKind.AUDIO
+                for track in output.component_tracks
+                if track.number != 0
+            )
+            for track in verification_tracks:
+                component, _cue_path, _skipped = resolve_audio(track)
+                write_offset = (
+                    verification_offsets.offset_for_lba(track.begin_lba)
+                    if verification_offsets is not None
+                    else 0
+                )
+                preceding = ()
+                following = ()
+                index = selected_indexes[track.number]
+                if write_offset > 0 and index > 0:
+                    neighbor = selected_audio[index - 1]
+                    if (
+                        verification_offsets.offset_for_lba(neighbor.begin_lba)
+                        == write_offset
+                    ):
+                        preceding = resolve_audio(neighbor)[0]
+                elif write_offset < 0 and index + 1 < len(selected_audio):
+                    neighbor = selected_audio[index + 1]
+                    if (
+                        verification_offsets.offset_for_lba(neighbor.begin_lba)
+                        == write_offset
+                    ):
+                        following = resolve_audio(neighbor)[0]
+                elif write_offset < 0:
+                    last = component[-1]
+                    tail_start = last.start_sector + last.sectors
+                    tail_sectors = min(
+                        last.bin_sectors - tail_start,
+                        ceil(-write_offset / 588),
+                    )
+                    if tail_sectors > 0:
+                        following = (
+                            AudioSegment(
+                                last.path,
+                                last.track_number,
+                                tail_start,
+                                tail_sectors,
+                                last.bin_sectors,
+                            ),
+                        )
+                verification.append(
+                    VerificationTrack(
+                        track,
+                        component,
+                        write_offset,
+                        preceding,
+                        following,
+                    )
+                )
         return tuple(outputs), tuple(verification)

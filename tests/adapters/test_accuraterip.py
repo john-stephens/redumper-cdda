@@ -31,14 +31,21 @@ class AccurateRipVerifierTests(unittest.TestCase):
         verifier = self.verifier(verify)
         verifier.prepare(plan)
         segment = AudioSegment(Path("audio.bin"), 1, 0, 10, 10)
+        adjacent = AudioSegment(Path("adjacent.bin"), 2, 0, 10, 10)
         split = SplitResult(
-            (), verification_tracks=(VerificationTrack(track, (segment,), -153),)
+            (),
+            verification_tracks=(
+                VerificationTrack(track, (segment,), -153, (), (adjacent,)),
+            ),
         )
         report = verifier.verify(plan, split, Path("/work"))
         self.assertEqual(report.disc_id, "id")
         self.assertEqual(report.results[0]["track"], 1)
         self.assertEqual(captured[0][1][0]["segments"][0]["sectors"], 10)
         self.assertEqual(captured[0][1][0]["write_offset"], -153)
+        self.assertEqual(
+            captured[0][1][0]["following_segments"][0]["track"], 2
+        )
 
     def test_translates_layout_selection_and_lookup_failures(self):
         data = Track(1, TrackKind.DATA, 4, 0, 10)

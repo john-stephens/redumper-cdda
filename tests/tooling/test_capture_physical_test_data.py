@@ -44,12 +44,11 @@ class CapturePhysicalTestDataTests(unittest.TestCase):
             track(1, TrackKind.DATA, 0, 100),
             track(2, TrackKind.DATA, 100, 200),
         )
-
         self.assertEqual(len(capture.scenarios_for("regular-audio", audio)), 6)
         self.assertEqual(len(capture.scenarios_for("track0-pregap", pregap)), 5)
         self.assertEqual(len(capture.scenarios_for("data-first", data_first)), 4)
         data_last_scenarios = capture.scenarios_for("data-last", data_last)
-        self.assertEqual(len(data_last_scenarios), 5)
+        self.assertEqual(len(data_last_scenarios), 6)
         final_data = data_last_scenarios[-1]
         self.assertEqual(final_data.name, "d07-final-data-track")
         self.assertEqual(final_data.selection, capture.TrackSelection(3, 3))
@@ -67,6 +66,26 @@ class CapturePhysicalTestDataTests(unittest.TestCase):
         self.assertEqual(len(error_scenarios), 3)
         self.assertFalse(error_scenarios[0].expect_errors)
         self.assertTrue(all(item.expect_errors for item in error_scenarios[1:]))
+        regression = next(
+            item for item in data_last_scenarios if item.name == "d05-all-tracks"
+        )
+        self.assertTrue(regression.include_data)
+        self.assertFalse(regression.expect_errors)
+        self.assertEqual(regression.strict_accuraterip_track, 1)
+        self.assertEqual(regression.required_write_offset_sign, -1)
+        self.assertEqual(regression.omitted_alignment_track, 2)
+        self.assertEqual(regression.fabricated_c2_track, 2)
+        for profile, scenarios, expected in (
+            ("regular-audio", capture.scenarios_for("regular-audio", audio), "a03-a04-all-audio"),
+            ("data-last", data_last_scenarios, "d05-all-tracks"),
+        ):
+            with self.subTest(profile=profile):
+                ordered = capture.capture_order(profile, scenarios)
+                self.assertEqual(ordered[0].name, expected)
+                self.assertCountEqual(ordered, scenarios)
+        self.assertIs(
+            capture.capture_order("data-only", data_scenarios), data_scenarios
+        )
 
     def test_profile_validation_fails_closed(self):
         audio = disc(track(1, TrackKind.AUDIO, 0, 100))
@@ -95,6 +114,11 @@ class CapturePhysicalTestDataTests(unittest.TestCase):
                 with self.assertRaises(capture.CaptureError):
                     capture.scenarios_for("audio-errors", audio, **options)
 
+        offset_disc = disc(
+            track(1, TrackKind.AUDIO, 0, 100),
+            track(2, TrackKind.AUDIO, 100, 200),
+            track(3, TrackKind.DATA, 220, 300),
+        )
     def test_requests_and_layout_records_are_auditable(self):
         scenario = capture.Scenario(
             "mixed", ("case",), capture.TrackSelection(1, 2), True
@@ -148,6 +172,14 @@ class CapturePhysicalTestDataTests(unittest.TestCase):
             error_range=(1, 3),
         )
         capture.validate_profile_options(complete)
+        capture.validate_profile_options(
+            SimpleNamespace(
+                profile="data-last",
+                clean_track=None,
+                error_track=None,
+                error_range=None,
+            )
+        )
         for args in (
             SimpleNamespace(
                 profile="audio-errors",
@@ -203,6 +235,53 @@ class CapturePhysicalTestDataTests(unittest.TestCase):
             Path(f"{prefix}.state").unlink()
             with self.assertRaisesRegex(capture.CaptureError, "missing .state"):
                 capture.validate_dump(prefix)
+
+    def test_automatic_write_offset_probe_and_profile_requirements(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prefix = root / "disc"
+            for suffix in (*capture.REQUIRED_DUMP_SUFFIXES, ".scram"):
+                Path(f"{prefix}{suffix}").write_bytes(suffix.encode())
+            log = root / "probe.log"
+
+            clean = SimpleNamespace(
+                returncode=0, stdout=b"disc write offset: 0\n"
+            )
+            offsets, command = capture.probe_write_offsets(
+                prefix, False, log, run=mock.Mock(return_value=clean)
+            )
+            self.assertEqual(offsets, ((0, 0),))
+            self.assertNotIn("--force-offset=0", command)
+            self.assertNotIn("--filesystem-trim", command)
+            capture.validate_profile_write_offsets("regular-audio", offsets)
+
+            shifted = SimpleNamespace(
+                returncode=0, stdout=b"disc write offset: -12\n"
+            )
+            offsets, command = capture.probe_write_offsets(
+                prefix, True, log, run=mock.Mock(return_value=shifted)
+            )
+            self.assertEqual(offsets, ((0, -12),))
+            self.assertIn("--filesystem-trim", command)
+            capture.validate_profile_write_offsets("data-last", offsets)
+
+            with self.assertRaisesRegex(capture.CaptureError, "requires.*zero"):
+                capture.validate_profile_write_offsets("regular-audio", offsets)
+            with self.assertRaisesRegex(capture.CaptureError, "negative nonzero"):
+                capture.validate_profile_write_offsets(
+                    "data-last", ((0, 0),)
+                )
+
+            failed = SimpleNamespace(returncode=2, stdout=b"failed")
+            with self.assertRaisesRegex(capture.CaptureError, "status 2"):
+                capture.probe_write_offsets(
+                    prefix, False, log, run=mock.Mock(return_value=failed)
+                )
+            malformed = SimpleNamespace(returncode=0, stdout=b"missing")
+            with self.assertRaisesRegex(capture.CaptureError, "could not determine"):
+                capture.probe_write_offsets(
+                    prefix, False, log, run=mock.Mock(return_value=malformed)
+                )
 
     def test_command_capture_and_streaming(self):
         with tempfile.TemporaryDirectory() as directory:

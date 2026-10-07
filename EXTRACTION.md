@@ -81,6 +81,9 @@ output policy is applied. Missing or malformed state and offset information
 fails closed. SCSI/C2 values for this mode are unresolved sample counts from
 the state file; historical Q counts are unavailable.
 
+`--show-layout` performs TOC inspection only. It does not acquire, split, or
+modify dump data.
+
 Output packaging does not change acquisition. By default, each selected track
 is written separately as `PREFIXNN.wav` or `PREFIXNN.iso`. `--single-file`
 combines a multi-track audio selection into `PREFIX.wav`; it does not trigger
@@ -234,8 +237,16 @@ only for selected audio tracks. Combined output is temporarily separated at the
 already established logical boundaries for checksumming; this does not trigger
 another redumper dump or split. When a mixed audio/data split reports a nonzero
 write offset, checksum-only WAVs are realigned with PCM from the adjacent
-selected audio track. This prevents the split-wide offset from invalidating
-every AccurateRip result and does not modify final WAV output.
+selected audio track. An adjacent track omitted from final output by
+`--abort-on-skip` remains available as read-only alignment material; it is not
+checksummed, committed, or reported as retained output. This prevents the
+split-wide offset from invalidating a clean track's AccurateRip result and does
+not modify final WAV output. For the final audio track of an enhanced CD, a
+negative offset may require frames beyond the split AUDIO BIN. AccurateRip
+excludes the final five sectors of that track, so the checksum-only WAV drops
+the shifted leading frames and zero-fills only the missing frames inside that
+excluded tail. This is permitted only when the entire fill fits within those
+five sectors and never affects production PCM.
 
 ARv2 matches are preferred, with ARv1 used as a fallback. Report the matching
 version, checksum, and database confidence for each selected audio track.

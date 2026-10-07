@@ -97,6 +97,16 @@ class OutputCoverageTests(unittest.TestCase):
             self.assertEqual(int.from_bytes(payload[:4], "little"), 590)
             self.assertEqual(int.from_bytes(payload[-4:], "little"), 1177)
 
+            final_track = root / "final.wav"
+            self.module.segments_to_wav(
+                [current], final_track, 1, write_offset=-2,
+                trailing_silence_frames=2,
+            )
+            with wave.open(str(final_track), "rb") as stream:
+                payload = stream.readframes(self.module.FRAMES_PER_SECTOR)
+            self.assertEqual(int.from_bytes(payload[:4], "little"), 590)
+            self.assertEqual(payload[-8:], b"\0" * 8)
+
             positive = root / "positive.wav"
             self.module.segments_to_wav(
                 [current], positive, 1, write_offset=2,
@@ -110,6 +120,11 @@ class OutputCoverageTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Insufficient adjacent"):
                 self.module.segments_to_wav(
                     [current], root / "missing.wav", 1, write_offset=-1
+                )
+            with self.assertRaisesRegex(RuntimeError, "Insufficient adjacent"):
+                self.module.segments_to_wav(
+                    [current], root / "invalid.wav", 1,
+                    trailing_silence_frames=-1,
                 )
 
             destination = mock.Mock()

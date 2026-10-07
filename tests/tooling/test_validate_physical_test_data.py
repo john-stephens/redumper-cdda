@@ -113,8 +113,7 @@ class ValidatePhysicalTestDataTests(unittest.TestCase):
                 ),
             )
 
-            with self.assertRaisesRegex(validate.ValidationError, "not found"):
-                validate.load_manifests(root, ["absent"])
+            self.assertEqual(validate.load_manifests(root, ["absent"]), [])
 
             arguments = validate.parser().parse_args(
                 ["--log-file", str(root / "validation.log")]
@@ -268,6 +267,75 @@ class ValidatePhysicalTestDataTests(unittest.TestCase):
                 [matching[0], validate.ParityOutput(Path("b"), "data", 1, "other")],
             )
 
+        outputs = {1: matching[0], 2: matching[1]}
+        self.assertIs(
+            validate.parity_candidates(
+                {"expected_media_errors": False}, outputs
+            ),
+            outputs,
+        )
+        self.assertEqual(
+            validate.parity_candidates(
+                {
+                    "expected_media_errors": True,
+                    "strict_accuraterip_track": 2,
+                },
+                outputs,
+            ),
+            {2: matching[1]},
+        )
+        self.assertEqual(
+            validate.parity_candidates(
+                {"expected_media_errors": True}, outputs
+            ),
+            {},
+        )
+
+        manifest = synthetic_manifest()
+        scenario = manifest["scenarios"][0]
+        self.assertEqual(validate.strict_known_clean_tracks(manifest, scenario), {1})
+        self.assertEqual(
+            validate.strict_known_clean_tracks(
+                manifest, {**scenario, "fabricated_c2_track": 1}
+            ),
+            set(),
+        )
+
+    def test_parity_is_checked_incrementally_and_retains_one_baseline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "first.iso"
+            second = root / "second.iso"
+            first.write_bytes(b"same")
+            second.write_bytes(b"same")
+            baselines = {}
+            retained = root / "retained"
+
+            validate.record_track_parity(
+                "synthetic",
+                {1: validate.ParityOutput(first, "data", 1, "same")},
+                baselines,
+                retained,
+            )
+            self.assertFalse(first.exists())
+            self.assertEqual(baselines[("synthetic", 1)].path.read_bytes(), b"same")
+
+            validate.record_track_parity(
+                "synthetic",
+                {1: validate.ParityOutput(second, "data", 1, "same")},
+                baselines,
+                retained,
+            )
+            self.assertTrue(second.exists())
+            self.assertEqual(len(baselines), 1)
+
+            with self.assertRaisesRegex(validate.ValidationError, "differs"):
+                validate.record_track_parity(
+                    "synthetic",
+                    {1: validate.ParityOutput(second, "data", 1, "different")},
+                    baselines,
+                )
+
     def test_command_status_and_offline_log_checks(self):
         success = SimpleNamespace(returncode=0, stdout="ok")
         with mock.patch.object(validate.subprocess, "run", return_value=success):
@@ -312,6 +380,26 @@ class ValidatePhysicalTestDataTests(unittest.TestCase):
             )
             self.assertIn("[synthetic] example ... PASS", console.getvalue())
             self.assertIn("[synthetic] failure ... FAIL", console.getvalue())
+            with redirect_stdout(console):
+                validate.skipped_test(
+                    validation_log, "[synthetic] unavailable", "no data available"
+                )
+            self.assertIn(
+                "TEST RESULT: SKIP — [synthetic] unavailable", stream.getvalue()
+            )
+            self.assertIn("Skip reason: no data available", stream.getvalue())
+            self.assertIn(
+                "[synthetic] unavailable ... SKIP (no data available)",
+                console.getvalue(),
+            )
+            failure = SimpleNamespace(returncode=2, stdout="failed")
+            with mock.patch.object(validate.subprocess, "run", return_value=failure):
+                with self.assertRaisesRegex(
+                    validate.ValidationError, "(?s)Extraction log tail.*verbose detail"
+                ):
+                    validate.run_command(
+                        ["tool", f"--log-file={detail}"], Path(directory), True
+                    )
         failure = SimpleNamespace(returncode=2, stdout="failed")
         with mock.patch.object(validate.subprocess, "run", return_value=failure):
             with self.assertRaisesRegex(validate.ValidationError, "expected success"):
@@ -398,6 +486,150 @@ class ValidatePhysicalTestDataTests(unittest.TestCase):
                 validate.assert_accuraterip(log, {1: "verified"})
             with self.assertRaisesRegex(validate.ValidationError, "results differ"):
                 validate.assert_accuraterip(log, {1: "verified", 2: "verified"})
+
+            validate.assert_accuraterip_track(log, 1, "no match")
+            with self.assertRaisesRegex(validate.ValidationError, "expected verified"):
+                validate.assert_accuraterip_track(log, 1, "verified")
+            with self.assertRaisesRegex(validate.ValidationError, "got missing"):
+                validate.assert_accuraterip_track(log, 2, "verified")
+
+    def test_required_nonzero_write_offset_is_manifest_driven(self):
+        manifest = synthetic_manifest()
+        scenario = {
+            **manifest["scenarios"][0],
+            "strict_accuraterip_track": 1,
+            "required_write_offset_sign": -1,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "validation.log"
+            log.write_text("disc write offset: -12\n", encoding="utf-8")
+            validate.assert_required_write_offset(manifest, scenario, log)
+
+            log.write_text("disc write offset: +12\n", encoding="utf-8")
+            with self.assertRaisesRegex(validate.ValidationError, "negative"):
+                validate.assert_required_write_offset(manifest, scenario, log)
+
+            scenario["required_write_offset_sign"] = 0
+            log.write_text("unparseable", encoding="utf-8")
+            validate.assert_required_write_offset(manifest, scenario, log)
+
+    def test_fabricates_c2_only_in_a_disposable_state_copy(self):
+        manifest = synthetic_manifest()
+        scenario = {
+            **manifest["scenarios"][0],
+            "fabricated_c2_track": 1,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = root / "profile"
+            source_dir = profile / "case"
+            source_dir.mkdir(parents=True)
+            source_prefix = source_dir / "disc"
+            scenario["existing_dump"] = "case/disc"
+            scenario["cdparanoia_toc_file"] = "toc.txt"
+            (profile / "toc.txt").write_text("toc", encoding="utf-8")
+            track = validate.selected_track(manifest, 1)
+            lba = track["begin_lba"] + track["length_sectors"] // 2
+            file_sample = (
+                (lba - validate.REDUMPER_LBA_START)
+                * validate.SAMPLES_PER_SECTOR
+                - 12
+            )
+            state = source_prefix.with_suffix(".state")
+            with state.open("wb") as stream:
+                stream.seek(file_sample)
+                stream.write(b"\x02")
+            (source_prefix.with_suffix(".toc")).write_bytes(b"toc")
+            log = root / "split.log"
+            log.write_text("disc write offset: -12\n", encoding="utf-8")
+            destination = root / "fabricated"
+
+            derived_root, derived = validate.fabricate_c2_dump(
+                profile, manifest, scenario, destination, log
+            )
+
+            derived_state = (
+                derived_root / derived["existing_dump"]
+            ).with_suffix(".state")
+            with derived_state.open("rb") as stream:
+                stream.seek(file_sample)
+                self.assertEqual(stream.read(1), b"\x01")
+            with state.open("rb") as stream:
+                stream.seek(file_sample)
+                self.assertEqual(stream.read(1), b"\x02")
+            record = json.loads(
+                (destination / "fabricated-c2.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(record["track"], 1)
+            self.assertIn("PCM is unchanged", record["kind"])
+
+    def test_capture_offset_requirements_fail_closed(self):
+        data_last_scenarios = [
+            {
+                "selected_tracks": [1],
+                "include_data": False,
+            },
+            {
+                "selected_tracks": [1, 2, 3],
+                "include_data": True,
+                "strict_accuraterip_track": 1,
+                "fabricated_c2_track": 2,
+                "omitted_alignment_track": 2,
+                "required_write_offset_sign": -1,
+            },
+        ]
+        validate.validate_capture_write_offsets(
+            {
+                "profile": "regular-audio",
+                "write_offset_probe": {"offsets": [[0, 0]]},
+            }
+        )
+        with self.assertRaisesRegex(validate.ValidationError, "requires zero"):
+            validate.validate_capture_write_offsets(
+                {
+                    "profile": "regular-audio",
+                    "write_offset_probe": {"offsets": [[0, -12]]},
+                }
+            )
+        validate.validate_capture_write_offsets(
+            {
+                "profile": "data-last",
+                "scenarios": data_last_scenarios,
+                "write_offset_probe": {"offsets": [[0, -12]]},
+            }
+        )
+        with self.assertRaisesRegex(validate.ValidationError, "negative nonzero"):
+            validate.validate_capture_write_offsets(
+                {
+                    "profile": "data-last",
+                    "scenarios": data_last_scenarios,
+                    "write_offset_probe": {"offsets": [[0, 0]]},
+                }
+            )
+        with self.assertRaisesRegex(validate.ValidationError, "lacks a valid"):
+            validate.validate_capture_write_offsets({"profile": "data-last"})
+        validate.validate_capture_write_offsets(
+            {"profile": "regular-audio"}, [0]
+        )
+        validate.validate_capture_write_offsets(
+            {"profile": "data-last", "scenarios": data_last_scenarios}, [-12]
+        )
+        with self.assertRaisesRegex(validate.ValidationError, "lacks the merged"):
+            validate.validate_capture_write_offsets(
+                {"profile": "data-last", "scenarios": []}, [-12]
+            )
+        validate.validate_capture_write_offsets({"profile": "data-only"})
+
+    def test_layout_probe_prefers_manifest_probe_then_complete_scenario(self):
+        manifest = synthetic_manifest()
+        first = manifest["scenarios"][0]
+        complete = {**first, "name": "complete", "selected_tracks": [1]}
+        manifest["scenarios"] = [complete]
+        self.assertIs(validate.layout_probe_scenario(manifest), complete)
+
+        manifest["scenarios"] = [first, complete]
+        manifest["write_offset_probe"] = {"scenario": first["name"]}
+        self.assertIs(validate.layout_probe_scenario(manifest), first)
 
 
 if __name__ == "__main__":

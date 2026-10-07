@@ -79,6 +79,7 @@ class SystemDependencyCheckerTests(unittest.TestCase):
             cdparanoia_from_file=True,
         )
         self.assertEqual(calls, [])
+        calls.clear()
         System.check(
             show_layout=False,
             mmc_from_files=True,
@@ -159,7 +160,10 @@ class CliApplicationTests(unittest.TestCase):
         track = Track(1, TrackKind.AUDIO, 0, 0, 10)
         application.read_layout.return_value = DiscLayout((track,), 10)
         self.assertEqual(command.execute(["drive", "--show-layout"]), 0)
-        self.assertEqual(reporter.publish.call_args.args[0].name, "disc_layout")
+        self.assertEqual(
+            [call.args[0].name for call in reporter.publish.call_args_list],
+            ["disc_layout"],
+        )
         application.run.assert_not_called()
         checker.check.assert_called_once_with(
             True,
@@ -224,7 +228,9 @@ class CliApplicationTests(unittest.TestCase):
             0,
         )
         checker.check.assert_called_once_with(
-            True, mmc_from_files=True, cdparanoia_from_file=True
+            True,
+            mmc_from_files=True,
+            cdparanoia_from_file=True,
         )
         factory.assert_called_once_with(
             mock.ANY,
@@ -243,7 +249,9 @@ class CliApplicationTests(unittest.TestCase):
         self.assertEqual(command.execute(arguments), 0)
 
         checker.check.assert_called_once_with(
-            False, mmc_from_files=True, cdparanoia_from_file=True
+            False,
+            mmc_from_files=True,
+            cdparanoia_from_file=True,
         )
         request = application.run.call_args.args[0]
         self.assertEqual(request.device, "-")
