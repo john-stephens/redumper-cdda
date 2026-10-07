@@ -56,21 +56,20 @@ class CapturePhysicalTestDataTests(unittest.TestCase):
         data_scenarios = capture.scenarios_for("data-only", data_only)
         self.assertEqual(len(data_scenarios), 2)
         self.assertTrue(all(item.include_data for item in data_scenarios))
-        error_scenarios = capture.scenarios_for(
-            "audio-errors",
-            audio,
-            clean_track=1,
-            error_track=2,
-            error_range=(1, 3),
+        regular_scenarios = capture.scenarios_for("regular-audio", audio)
+        fabricated = {
+            item.name: item.fabricated_c2_track
+            for item in regular_scenarios
+            if item.fabricated_c2_track is not None
+        }
+        self.assertEqual(
+            fabricated,
+            {"a02-track-02": 2, "a03-a04-all-audio": 2},
         )
-        self.assertEqual(len(error_scenarios), 3)
-        self.assertFalse(error_scenarios[0].expect_errors)
-        self.assertTrue(all(item.expect_errors for item in error_scenarios[1:]))
         regression = next(
             item for item in data_last_scenarios if item.name == "d05-all-tracks"
         )
         self.assertTrue(regression.include_data)
-        self.assertFalse(regression.expect_errors)
         self.assertEqual(regression.strict_accuraterip_track, 1)
         self.assertEqual(regression.required_write_offset_sign, -1)
         self.assertEqual(regression.omitted_alignment_track, 2)
@@ -96,23 +95,12 @@ class CapturePhysicalTestDataTests(unittest.TestCase):
             ("data-first", audio),
             ("data-last", data),
             ("data-only", audio),
-            ("audio-errors", audio),
             ("unknown", data),
         )
         for profile, layout in cases:
             with self.subTest(profile=profile):
                 with self.assertRaises(capture.CaptureError):
                     capture.scenarios_for(profile, layout)
-
-        invalid_error_options = (
-            {"clean_track": 1, "error_track": 1, "error_range": (1, 2)},
-            {"clean_track": 1, "error_track": 2, "error_range": (2, 3)},
-            {"clean_track": 1, "error_track": 4, "error_range": (1, 4)},
-        )
-        for options in invalid_error_options:
-            with self.subTest(options=options):
-                with self.assertRaises(capture.CaptureError):
-                    capture.scenarios_for("audio-errors", audio, **options)
 
         offset_disc = disc(
             track(1, TrackKind.AUDIO, 0, 100),
@@ -142,15 +130,6 @@ class CapturePhysicalTestDataTests(unittest.TestCase):
         for value in ("-1", "bad"):
             with self.assertRaises(argparse.ArgumentTypeError):
                 capture.nonnegative_int(value)
-        self.assertEqual(capture.positive_int("2"), 2)
-        self.assertEqual(capture.bounded_track_range("2-4"), (2, 4))
-        for value in ("0",):
-            with self.assertRaises(argparse.ArgumentTypeError):
-                capture.positive_int(value)
-        for value in ("2", "2-2", "3-2", "a-b"):
-            with self.assertRaises(argparse.ArgumentTypeError):
-                capture.bounded_track_range(value)
-
         inquiry = bytearray(36)
         inquiry[8:16] = b"VENDOR  "
         inquiry[16:32] = b"MODEL           "
@@ -164,60 +143,25 @@ class CapturePhysicalTestDataTests(unittest.TestCase):
         with self.assertRaises(capture.CaptureError):
             capture.parse_inquiry(bytes(36))
 
-    def test_error_profile_options_and_retained_status(self):
-        complete = SimpleNamespace(
-            profile="audio-errors",
-            clean_track=1,
-            error_track=2,
-            error_range=(1, 3),
-        )
-        capture.validate_profile_options(complete)
-        capture.validate_profile_options(
-            SimpleNamespace(
-                profile="data-last",
-                clean_track=None,
-                error_track=None,
-                error_range=None,
-            )
-        )
-        for args in (
-            SimpleNamespace(
-                profile="audio-errors",
-                clean_track=None,
-                error_track=2,
-                error_range=(1, 3),
-            ),
-            SimpleNamespace(
-                profile="regular-audio",
-                clean_track=1,
-                error_track=None,
-                error_range=None,
-            ),
-        ):
-            with self.assertRaises(capture.CaptureError):
-                capture.validate_profile_options(args)
-
+    def test_captured_media_error_status_is_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             log = Path(directory) / "dump.log"
             log.write_text(
                 "media errors:\n  SCSI: 0\n  C2: 0\n  Q: 3\n",
                 encoding="utf-8",
             )
-            self.assertEqual(capture.validate_expected_errors(log, False)["Q"], 3)
-            with self.assertRaisesRegex(capture.CaptureError, "unexpectedly finished"):
-                capture.validate_expected_errors(log, True)
+            self.assertEqual(capture.validate_clean_capture(log)["Q"], 3)
 
             log.write_text(
                 "media errors:\n  SCSI: 1\n  C2: 2\n  Q: 0\n",
                 encoding="utf-8",
             )
-            self.assertEqual(capture.validate_expected_errors(log, True)["C2"], 2)
-            with self.assertRaisesRegex(capture.CaptureError, "clean-control"):
-                capture.validate_expected_errors(log, False)
+            with self.assertRaisesRegex(capture.CaptureError, "clean capture"):
+                capture.validate_clean_capture(log)
 
             log.write_text("no status", encoding="utf-8")
             with self.assertRaisesRegex(capture.CaptureError, "could not determine"):
-                capture.validate_expected_errors(log, True)
+                capture.validate_clean_capture(log)
 
     def test_dump_validation_and_hash_manifest(self):
         with tempfile.TemporaryDirectory() as directory:

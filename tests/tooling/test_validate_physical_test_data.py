@@ -564,6 +564,18 @@ class ValidatePhysicalTestDataTests(unittest.TestCase):
             self.assertIn("PCM is unchanged", record["kind"])
 
     def test_capture_offset_requirements_fail_closed(self):
+        regular_scenarios = [
+            {
+                "name": "a02-track-02",
+                "selected_tracks": [2],
+                "include_data": False,
+            },
+            {
+                "name": "a03-a04-all-audio",
+                "selected_tracks": [1, 2, 3],
+                "include_data": False,
+            },
+        ]
         data_last_scenarios = [
             {
                 "selected_tracks": [1],
@@ -581,6 +593,7 @@ class ValidatePhysicalTestDataTests(unittest.TestCase):
         validate.validate_capture_write_offsets(
             {
                 "profile": "regular-audio",
+                "scenarios": regular_scenarios,
                 "write_offset_probe": {"offsets": [[0, 0]]},
             }
         )
@@ -588,6 +601,7 @@ class ValidatePhysicalTestDataTests(unittest.TestCase):
             validate.validate_capture_write_offsets(
                 {
                     "profile": "regular-audio",
+                    "scenarios": regular_scenarios,
                     "write_offset_probe": {"offsets": [[0, -12]]},
                 }
             )
@@ -609,8 +623,12 @@ class ValidatePhysicalTestDataTests(unittest.TestCase):
         with self.assertRaisesRegex(validate.ValidationError, "lacks a valid"):
             validate.validate_capture_write_offsets({"profile": "data-last"})
         validate.validate_capture_write_offsets(
-            {"profile": "regular-audio"}, [0]
+            {"profile": "regular-audio", "scenarios": regular_scenarios}, [0]
         )
+        with self.assertRaisesRegex(validate.ValidationError, "synthetic error"):
+            validate.validate_capture_write_offsets(
+                {"profile": "regular-audio", "scenarios": []}, [0]
+            )
         validate.validate_capture_write_offsets(
             {"profile": "data-last", "scenarios": data_last_scenarios}, [-12]
         )

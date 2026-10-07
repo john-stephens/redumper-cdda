@@ -42,7 +42,6 @@ PHYSICAL_PROFILES = (
     "data-first",
     "data-last",
     "data-only",
-    "audio-errors",
 )
 
 
@@ -770,10 +769,22 @@ def clean_tracks(manifest):
 
 def strict_known_clean_tracks(manifest, scenario):
     result = clean_tracks(manifest) & set(scenario["selected_tracks"])
-    fabricated = scenario.get("fabricated_c2_track")
+    fabricated = scenario_fabricated_c2_track(manifest, scenario)
     if fabricated is not None:
         result.discard(fabricated)
     return result
+
+
+def scenario_fabricated_c2_track(manifest, scenario):
+    fabricated = scenario.get("fabricated_c2_track")
+    if fabricated is not None:
+        return fabricated
+    if manifest["profile"] == "regular-audio" and scenario["name"] in (
+        "a02-track-02",
+        "a03-a04-all-audio",
+    ):
+        return 2
+    return None
 
 
 def layout_probe_scenario(manifest):
@@ -841,6 +852,19 @@ def validate_capture_write_offsets(manifest, observed_offsets=None):
         raise ValidationError(
             f"{profile} capture requires zero write offset; recorded {values}"
         )
+    if profile == "regular-audio":
+        synthetic = {
+            scenario["name"]: scenario_fabricated_c2_track(manifest, scenario)
+            for scenario in manifest.get("scenarios", ())
+            if scenario["name"] in ("a02-track-02", "a03-a04-all-audio")
+        }
+        if synthetic != {
+            "a02-track-02": 2,
+            "a03-a04-all-audio": 2,
+        }:
+            raise ValidationError(
+                "regular-audio capture lacks the merged synthetic error regressions"
+            )
     if profile == "data-last" and not any(offset < 0 for offset in values):
         raise ValidationError(
             "data-last capture requires a negative nonzero write offset"
@@ -941,7 +965,8 @@ def fabricate_c2_dump(profile_dir, manifest, scenario, destination, split_log):
                 raise ValidationError("fabricated C2 sample lies outside state file")
             if original[0] in (REDUMPER_ERROR_SKIP, REDUMPER_ERROR_C2):
                 raise ValidationError(
-                    "data-last capture is not clean at fabricated C2 sample"
+                    f"{manifest['profile']} capture is not clean at fabricated "
+                    "C2 sample"
                 )
             state.seek(file_sample)
             state.write(bytes((REDUMPER_ERROR_C2,)))
@@ -987,6 +1012,43 @@ def validate_scenario(
     assert_accuraterip(separate_dir / "validation.log", accuraterip_results)
     expected = expected_outputs(manifest, scenario, separate_dir)
     separate_hashes = validate_output_set(expected)
+
+    fabricated_track = scenario_fabricated_c2_track(manifest, scenario)
+    if fabricated_track is not None:
+        warned_dir = scenario_dir / "warned"
+        warned_dir.mkdir()
+        fabricated_profile_dir, fabricated_scenario = fabricate_c2_dump(
+            profile_dir,
+            manifest,
+            {**scenario, "fabricated_c2_track": fabricated_track},
+            warned_dir / "fabricated-source",
+            separate_dir / "validation.log",
+        )
+        command = extraction_command(
+            launcher,
+            fabricated_profile_dir,
+            fabricated_scenario,
+            warned_dir,
+            accuraterip=bool(accuraterip_numbers),
+        )
+        warned_result = run_command(
+            command, warned_dir, expect_success=True, validation_log=validation_log
+        )
+        warned_log = warned_dir / "validation.log"
+        assert_offline_log(warned_log)
+        synthetic_accuraterip = dict(accuraterip_results)
+        if fabricated_track in synthetic_accuraterip:
+            synthetic_accuraterip[fabricated_track] = "no match"
+        assert_accuraterip(warned_log, synthetic_accuraterip)
+        validate_output_set(
+            expected_outputs(manifest, scenario, warned_dir)
+        )
+        if "writing output from the existing dump with unresolved" not in (
+            warned_result.stdout
+        ):
+            raise ValidationError(
+                f"synthetic error did not produce a warning: {scenario['name']}"
+            )
 
     tracks = [selected_track(manifest, number) for number in scenario["selected_tracks"]]
     all_audio = all(track["kind"] == "audio" for track in tracks)
@@ -1046,19 +1108,16 @@ def validate_scenario(
                 f"invalid mixed single-file mode created output: {scenario['name']}"
             )
 
-    if scenario.get("expected_media_errors", False) or scenario.get(
-        "fabricated_c2_track"
-    ) is not None:
+    if scenario.get("expected_media_errors", False) or fabricated_track is not None:
         strict_dir = scenario_dir / "strict"
         strict_dir.mkdir()
         strict_profile_dir = profile_dir
         strict_scenario = scenario
-        fabricated_track = scenario.get("fabricated_c2_track")
         if fabricated_track is not None:
             strict_profile_dir, strict_scenario = fabricate_c2_dump(
                 profile_dir,
                 manifest,
-                scenario,
+                {**scenario, "fabricated_c2_track": fabricated_track},
                 strict_dir / "fabricated-source",
                 separate_dir / "validation.log",
             )
@@ -1106,8 +1165,8 @@ def validate_scenario(
             strict_single_dir.mkdir()
             command = extraction_command(
                 launcher,
-                profile_dir,
-                scenario,
+                strict_profile_dir,
+                strict_scenario,
                 strict_single_dir,
                 single_file=True,
                 abort_on_skip=True,

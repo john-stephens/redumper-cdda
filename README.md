@@ -167,8 +167,6 @@ inserted:
 ./scripts/capture_physical_test_data.py data-first /dev/sg4
 ./scripts/capture_physical_test_data.py data-last /dev/sg4
 ./scripts/capture_physical_test_data.py data-only /dev/sg4
-./scripts/capture_physical_test_data.py audio-errors /dev/sg4 \
-  --clean-track=1 --error-track=2 --error-range=1-3
 ```
 
 Each invocation first captures and reconciles the live MMC and cdparanoia
@@ -188,14 +186,13 @@ before any of the remaining scenario dumps are started. The complete range is
 intentional: a smaller audio/data range can produce a different inferred
 offset and is not accepted as a substitute for the capture being validated.
 
-The `audio-errors` profile requires a known-clean audio track, a known-damaged
-audio track, and a contiguous all-audio range containing both. It captures a
-clean control, the damaged track alone, and the mixed range. Its default is
-`--retries=0`; the other profiles default to `--retries=100`. The script fails
-unless the clean control finishes at SCSI/C2 `0/0` and both damaged
-captures retain a nonzero SCSI or C2 count. This makes the resulting fixtures
-useful for deterministic offline error-policy tests. Override `--retries` when
-a particular physical test requires another initial-read policy.
+The `regular-audio` capture must be clean. Offline validation copies its
+single-track and all-tracks dumps, fabricates an unresolved C2 state in each
+disposable copy, and exercises both the default warned-output policy and the
+strict per-track/single-file policies. Captured PCM is never modified and the
+source corpus remains hash-identical; redumper may replace the flagged sample
+when splitting the disposable copy. A separate damaged-disc capture is not
+required.
 
 The `data-last` profile uses a clean enhanced CD whose final track is data. It
 automatically uses the final two audio tracks as the AccurateRip target and

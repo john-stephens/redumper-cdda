@@ -46,7 +46,6 @@ PROFILES = (
     "data-first",
     "data-last",
     "data-only",
-    "audio-errors",
 )
 REQUIRED_DUMP_SUFFIXES = (".state", ".subcode", ".toc", ".fulltoc")
 OFFSET_PROBE_SCENARIOS = {
@@ -70,7 +69,6 @@ class Scenario:
     cases: tuple
     selection: TrackSelection
     include_data: bool = False
-    expect_errors: bool = False
     strict_accuraterip_track: object = None
     required_write_offset_sign: int = 0
     omitted_alignment_track: object = None
@@ -99,28 +97,7 @@ def parser():
     result.add_argument(
         "--retries",
         type=nonnegative_int,
-        help=(
-            "redumper retries for each scenario dump (default: 100, or 0 "
-            "for audio-errors)"
-        ),
-    )
-    result.add_argument(
-        "--clean-track",
-        type=positive_int,
-        metavar="N",
-        help="known-clean audio track for audio-errors",
-    )
-    result.add_argument(
-        "--error-track",
-        type=positive_int,
-        metavar="N",
-        help="known-damaged audio track for audio-errors",
-    )
-    result.add_argument(
-        "--error-range",
-        type=bounded_track_range,
-        metavar="N-M",
-        help="all-audio range containing both designated audio tracks",
+        help="redumper retries for each scenario dump (default: 100)",
     )
     return result
 
@@ -133,41 +110,6 @@ def nonnegative_int(value):
     if number < 0:
         raise argparse.ArgumentTypeError("must be a non-negative integer")
     return number
-
-
-def positive_int(value):
-    number = nonnegative_int(value)
-    if number == 0:
-        raise argparse.ArgumentTypeError("must be a positive track number")
-    return number
-
-
-def bounded_track_range(value):
-    parts = value.split("-", 1)
-    if len(parts) != 2:
-        raise argparse.ArgumentTypeError("must be a bounded range N-M")
-    try:
-        start, end = (positive_int(part) for part in parts)
-    except argparse.ArgumentTypeError as exc:
-        raise argparse.ArgumentTypeError("must be a bounded range N-M") from exc
-    if start >= end:
-        raise argparse.ArgumentTypeError("range must contain at least two tracks")
-    return (start, end)
-
-
-def validate_profile_options(args):
-    error_options = (args.clean_track, args.error_track, args.error_range)
-    if args.profile == "audio-errors":
-        if any(value is None for value in error_options):
-            raise CaptureError(
-                f"{args.profile} requires --clean-track, --error-track, "
-                "and --error-range"
-            )
-    elif any(value is not None for value in error_options):
-        raise CaptureError(
-            "--clean-track, --error-track, and --error-range are only valid "
-            "with audio-errors"
-        )
 
 
 def record_command(records, command, returncode, output):
@@ -230,9 +172,6 @@ def stream_command(command, output, records, popen=subprocess.Popen, terminal=No
 def scenarios_for(
     profile,
     disc,
-    error_track=None,
-    error_range=None,
-    clean_track=None,
 ):
     tracks = disc.tracks
     audio = disc.audio_tracks()
@@ -245,13 +184,25 @@ def scenarios_for(
                 "regular-audio requires at least three audio tracks and Track 1 at LBA 0"
             )
         return (
-            Scenario("a02-track-01", ("A02 first",), TrackSelection(1, 1)),
-            Scenario("a02-track-02", ("A02 middle",), TrackSelection(2, 2)),
+            Scenario(
+                "a02-track-01", ("A02 first", "F01 clean control"),
+                TrackSelection(1, 1),
+            ),
+            Scenario(
+                "a02-track-02",
+                ("A02 middle", "F02 synthetic single-track errors"),
+                TrackSelection(2, 2),
+                fabricated_c2_track=2,
+            ),
             Scenario("a02-final-track", ("A02 final",), TrackSelection(final, final)),
             Scenario(
                 "a03-a04-all-audio",
-                ("A03", "A04", "A05 full/omitted", "A07 full"),
+                (
+                    "A03", "A04", "A05 full/omitted", "A07 full",
+                    "F03 synthetic range errors",
+                ),
                 TrackSelection(1, final),
+                fabricated_c2_track=2,
             ),
             Scenario("a05-through-03", ("A05 -3",), TrackSelection(None, 3)),
             Scenario("a05-from-02", ("A05 2-",), TrackSelection(2, None)),
@@ -360,53 +311,6 @@ def scenarios_for(
                 )
             )
         return tuple(result)
-    if profile == "audio-errors":
-        if clean_track is None or error_track is None or error_range is None:
-            raise CaptureError(
-                "audio-errors requires --clean-track, --error-track, and --error-range"
-            )
-        by_number = {track.number: track for track in tracks}
-        for label, number in (
-            ("clean", clean_track),
-            ("damaged", error_track),
-        ):
-            selected = by_number.get(number)
-            if selected is None or selected.kind is not TrackKind.AUDIO:
-                raise CaptureError(
-                    f"the {label} track ({number}) must be an audio track"
-                )
-        start, end = error_range
-        if clean_track == error_track:
-            raise CaptureError("clean and damaged tracks must be different")
-        if not (start <= clean_track <= end and start <= error_track <= end):
-            raise CaptureError(
-                "--error-range must contain both the clean and damaged tracks"
-            )
-        for number in range(start, end + 1):
-            selected = by_number.get(number)
-            if selected is None or selected.kind is not TrackKind.AUDIO:
-                raise CaptureError(
-                    "--error-range must be a contiguous all-audio range"
-                )
-        return (
-            Scenario(
-                "f01-clean-control",
-                ("F01",),
-                TrackSelection(clean_track, clean_track),
-            ),
-            Scenario(
-                "f02-f03-f06-f07-damaged-track",
-                ("F02", "F03", "F06", "F07", "F08"),
-                TrackSelection(error_track, error_track),
-                expect_errors=True,
-            ),
-            Scenario(
-                "f04-f05-damaged-range",
-                ("F04", "F05", "F09", "F10"),
-                TrackSelection(start, end),
-                expect_errors=True,
-            ),
-        )
     raise CaptureError(f"unknown profile: {profile}")
 
 
@@ -473,7 +377,7 @@ def validate_dump(prefix):
         )
 
 
-def validate_expected_errors(log_path, expect_errors):
+def validate_clean_capture(log_path):
     output = log_path.read_text(encoding="utf-8", errors="replace")
     errors = parse_media_errors(output)
     if errors is None:
@@ -481,13 +385,9 @@ def validate_expected_errors(log_path, expect_errors):
             f"could not determine SCSI/C2 status from {log_path}"
         )
     has_errors = errors["SCSI"] > 0 or errors["C2"] > 0
-    if expect_errors and not has_errors:
+    if has_errors:
         raise CaptureError(
-            "damaged-disc scenario unexpectedly finished with SCSI=0, C2=0"
-        )
-    if not expect_errors and has_errors:
-        raise CaptureError(
-            "clean-control scenario unexpectedly retained SCSI or C2 errors"
+            "clean capture unexpectedly retained SCSI or C2 errors"
         )
     return errors
 
@@ -605,7 +505,6 @@ def capture(args):
     for executable in ("redumper", "cdparanoia", "sg_raw"):
         if shutil.which(executable) is None:
             raise CaptureError(f"{executable} not found")
-    validate_profile_options(args)
     destination = args.output_root.resolve() / args.profile
     if destination.exists():
         raise CaptureError(
@@ -626,7 +525,7 @@ def capture(args):
     }
     retries = args.retries
     if retries is None:
-        retries = 0 if args.profile == "audio-errors" else 100
+        retries = 100
     manifest["retries"] = retries
     manifest_path = destination / "manifest.json"
     try:
@@ -678,13 +577,7 @@ def capture(args):
         manifest["layout"] = layout_record(disc)
         planner = ExtractionPlanner(OutputPlanner(), RedumperCommandFactory)
 
-        scenarios = scenarios_for(
-            args.profile,
-            disc,
-            error_track=args.error_track,
-            error_range=args.error_range,
-            clean_track=args.clean_track,
-        )
+        scenarios = scenarios_for(args.profile, disc)
         for scenario in capture_order(args.profile, scenarios):
             scenario_dir = destination / scenario.name
             scenario_dir.mkdir()
@@ -713,7 +606,7 @@ def capture(args):
                 "logical_end_lba": plan.logical_end_lba,
                 "dump_start_lba": plan.dump_start_lba,
                 "dump_end_lba": plan.dump_end_lba,
-                "expected_media_errors": scenario.expect_errors,
+                "expected_media_errors": False,
                 "strict_accuraterip_track": scenario.strict_accuraterip_track,
                 "required_write_offset_sign": scenario.required_write_offset_sign,
                 "omitted_alignment_track": scenario.omitted_alignment_track,
@@ -728,10 +621,7 @@ def capture(args):
             )
             prefix = scenario_dir / plan.image_name
             validate_dump(prefix)
-            errors = validate_expected_errors(
-                scenario_dir / "redumper-dump.log",
-                scenario.expect_errors,
-            )
+            errors = validate_clean_capture(scenario_dir / "redumper-dump.log")
             scenario_record["media_errors"] = errors
             dumped_layout = read_captured_layout(
                 Path(f"{prefix}.toc"),

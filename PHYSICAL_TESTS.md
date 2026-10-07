@@ -1,6 +1,6 @@
 # Physical-disc validation plan
 
-This plan validates `redumper-cdda` against six representative physical CD
+This plan validates `redumper-cdda` against five representative physical CD
 conditions and layouts:
 
 1. regular audio CD;
@@ -8,9 +8,7 @@ conditions and layouts:
 3. audio CD with a data track first;
 4. clean enhanced CD with a data track last, a nonzero split offset, and two
    adjacent clean audio tracks used for a synthetic strict-policy regression;
-5. data-only CD;
-6. audio CD with a known-clean track and a track with repeatable SCSI or C2
-   errors.
+5. data-only CD.
 
 The suite emphasizes exact boundaries, output equivalence across extraction
 modes, mixed-mode handling, integrity policy, and reuse of existing redumper
@@ -29,8 +27,6 @@ capturing another profile:
 ./scripts/capture_physical_test_data.py data-first /dev/sg4
 ./scripts/capture_physical_test_data.py data-last /dev/sg4
 ./scripts/capture_physical_test_data.py data-only /dev/sg4
-./scripts/capture_physical_test_data.py audio-errors /dev/sg4 \
-  --clean-track=C --error-track=N --error-range=N-M
 ```
 
 The captures live under the Git-ignored `test_data/` directory. Every scenario
@@ -41,11 +37,9 @@ commands, statuses, and drive identity. Use the profile-level
 `cdparanoia-toc.txt` for `--cdparanoia-toc-file`. Packaging-only variants reuse
 the same captured dump because they do not change acquisition.
 
-For `audio-errors`, replace `C` with a known-clean audio track, `N` with a
-known-damaged audio track, and `N-M` with a contiguous all-audio range that
-contains both. The profile uses zero retries by default and rejects captures
-unless the control is clean and both damaged scenarios retain SCSI or C2
-errors.
+The regular-audio capture must remain clean. The offline validator fabricates
+C2 states only in disposable copies of its single-track and all-tracks dumps;
+no damaged disc or separate error profile is required.
 
 For `data-last`, use an enhanced CD whose final track is data. The script
 automatically uses the final two audio tracks as clean target Track `C` and
@@ -519,127 +513,37 @@ Repeat E03 and, where applicable, E04 with `--existing-dump` and the captured
 cdparanoia TOC. Expected: ISO hashes
 match live extraction and all source dump hashes remain unchanged.
 
-## F. Integrity and refinement
+## F. Synthetic integrity-policy regression
 
-Run these cases using at least one imperfect audio disc. If available, also
-run them with the enhanced CD.
+The offline validator uses the clean `regular-audio` capture. It changes one
+sample-state byte to unresolved C2 in disposable copies; it never changes the
+captured PCM or source fixtures. Redumper may replace the flagged output sample
+to represent the unresolved read.
 
-### F01 - Clean disc skips refinement
+### F01 - Clean control
 
-Expected phase sequence:
+The original single-track and all-tracks dumps extract without an unresolved
+error warning and retain their AccurateRip results.
 
-``` text
-dump -> inspect 0/0 -> split
-```
+### F02 - Synthetic single-track error
 
-No refine command should appear in the log.
+The validator fabricates C2 state in Track 2. Default mode succeeds, reports
+the unresolved error, retains the output despite its expected AccurateRip
+mismatch, and leaves the captured source unchanged. With `--abort-on-skip`,
+Track 2 is omitted and the command exits nonzero.
 
-### F02 - Recoverable errors
+### F03 - Synthetic range error
 
-Use a disc and drive combination that initially reports SCSI or C2 errors:
+The validator fabricates C2 state in Track 2 of the all-audio range. Default
+mode retains every output and reports the expected Track 2 AccurateRip
+mismatch without treating it as evidence of another read error.
+Strict separate mode retains every clean track and omits only Track 2; strict
+single-file mode rejects the combined output. No dump or refine command runs
+for these imported-dump checks, and source hashes remain unchanged.
 
-``` bash
-redumper-cdda /dev/sg4 N --refine-passes=3 --log-file=F02.log
-```
-
-Expected:
-
--   Refinement begins only after nonzero SCSI/C2 is detected.
--   Every refine uses the exact initial dump LBA bounds.
--   Refinement stops immediately when SCSI and C2 both reach zero.
--   Per-track progress displays that track's current error counts.
-
-### F03 - Unresolved errors with default policy
-
-``` bash
-redumper-cdda /dev/sg4 N --refine-passes=1 --log-file=F03.log
-```
-
-Expected: output is created, and the final SCSI/C2 counts and an unresolved
-error warning are shown.
-
-### F04 - Per-track strict policy
-
-Choose a range containing clean and damaged tracks:
-
-``` bash
-redumper-cdda /dev/sg4 N-M --abort-on-skip --log-file=F04.log
-```
-
-Expected:
-
--   Clean track files are retained.
--   Only affected track files are omitted.
--   The command exits nonzero.
-
-### F05 - Single-file strict policy
-
-``` bash
-redumper-cdda /dev/sg4 N-M --single-file --abort-on-skip \
-  --log-file=F05.log
-```
-
-Expected: any unresolved SCSI or C2 state rejects the complete combined
-output.
-
-### F06 - Unlimited-refinement interruption
-
-``` bash
-redumper-cdda /dev/sg4 N --refine-forever --log-file=F06.log
-```
-
-Interrupt the command with Ctrl-C during refinement. Expected:
-
--   The active redumper process stops.
--   The temporary workspace is removed.
--   No incomplete output remains.
-
-### F07 - Imported dump with unresolved errors
-
-Import a dump known to retain SCSI or C2 errors. Expected:
-
--   No refinement is attempted.
--   Default mode writes output with a warning.
--   `--abort-on-skip` applies the same per-track or single-file policy as live
-    acquisition.
--   Q is reported as unavailable and does not alter the SCSI/C2 policy.
-
-### F08 - Captured damaged track with default policy
-
-Use the `f02-f03-f06-f07-damaged-track` fixture from the `audio-errors`
-capture:
-
-``` bash
-redumper-cdda N \
-  --existing-dump=test_data/audio-errors/f02-f03-f06-f07-damaged-track/trackNN \
-  --cdparanoia-toc-file=test_data/audio-errors/cdparanoia-toc.txt \
-  --no-accuraterip --log-file=F08.log
-```
-
-Replace `N` and `trackNN` with the captured damaged track number. Expected:
-
--   no device is required and no dump or refine command runs;
--   the output is created with an unresolved SCSI/C2 warning; and
--   source hashes still match `SHA256SUMS` after extraction.
-
-### F09 - Captured damaged range with per-track strict policy
-
-Use the `f04-f05-damaged-range` fixture:
-
-``` bash
-redumper-cdda N-M --abort-on-skip \
-  --existing-dump=test_data/audio-errors/f04-f05-damaged-range/tracksNN-MM \
-  --cdparanoia-toc-file=test_data/audio-errors/cdparanoia-toc.txt \
-  --no-accuraterip --log-file=F09.log
-```
-
-Expected: clean track files are retained, affected files are omitted, and the
-command exits nonzero.
-
-### F10 - Captured damaged range with single-file strict policy
-
-Repeat F09 with `--single-file`. Expected: the unresolved SCSI/C2 state rejects
-the combined output and no final WAV is created.
+Live acquisition/refinement sequencing, bounded refinement, and interruption
+cleanup remain covered by the automated application and adapter tests; they no
+longer require a repeatably damaged physical disc fixture.
 
 ## D (continued). Nonzero-offset strict AccurateRip regression
 
