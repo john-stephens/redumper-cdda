@@ -59,12 +59,16 @@ class RedumperClient:
 
     def dump(self, plan, **options):
         return self._run(
-            plan.dump_command, progress_tracks=plan.selection.tracks, **options
+            plan.dump_command,
+            progress_tracks=getattr(plan.selection, "spans", plan.selection.tracks),
+            **options,
         )
 
     def refine(self, plan, **options):
         return self._run(
-            plan.refine_command, progress_tracks=plan.selection.tracks, **options
+            plan.refine_command,
+            progress_tracks=getattr(plan.selection, "spans", plan.selection.tracks),
+            **options,
         )
 
     def split(self, plan, **options):
@@ -303,13 +307,14 @@ class RedumperStateInspector:
 
     @staticmethod
     def _serialize_track(track):
+        source = getattr(track, "track", track)
         return {
-            "number": track.number,
-            "kind": track.kind.value,
-            "control": track.control,
+            "number": source.number,
+            "kind": source.kind.value,
+            "control": source.control,
             "length": track.length_sectors,
-            "length_msf": track.length_msf,
+            "length_msf": source.length_msf,
             "begin": track.begin_lba,
-            "begin_msf": track.begin_msf,
+            "begin_msf": source.begin_msf,
             "end": track.end_lba,
         }

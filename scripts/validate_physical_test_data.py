@@ -56,6 +56,7 @@ class ParityOutput:
     sectors: int
     digest: str
     write_offset: int = 0
+    start_offset_sectors: int = 0
 
 
 class ValidationLog:
@@ -330,7 +331,10 @@ def extraction_command(
     if show_layout:
         command.append("--show-layout")
     else:
-        command.append(selection_text(scenario["selected_tracks"]))
+        command.append(
+            scenario.get("selection")
+            or selection_text(scenario["selected_tracks"])
+        )
     command.extend(
         [
             f"--existing-dump={prefix}",
@@ -410,10 +414,19 @@ def accuraterip_tracks(manifest, scenario):
     disc_tracks = manifest["layout"]["tracks"]
     if disc_tracks and disc_tracks[0]["kind"] == "data":
         return ()
+    partial = {
+        span["track"]
+        for span in scenario.get("selected_spans", ())
+        if span["start_offset_sectors"] != 0
+        or span["sectors"]
+        != selected_track(manifest, span["track"])["length_sectors"]
+    }
     return tuple(
         number
         for number in scenario["selected_tracks"]
-        if number != 0 and selected_track(manifest, number)["kind"] == "audio"
+        if number != 0
+        and number not in partial
+        and selected_track(manifest, number)["kind"] == "audio"
     )
 
 
@@ -622,18 +635,23 @@ def iso_hash(path, expected_track_sectors):
 
 def expected_outputs(manifest, scenario, directory, single_file=False):
     tracks = [selected_track(manifest, number) for number in scenario["selected_tracks"]]
+    span_sectors = {
+        span["track"]: span["sectors"]
+        for span in scenario.get("selected_spans", ())
+    }
     if single_file and len(tracks) > 1 and all(
         track["kind"] == "audio" for track in tracks
     ):
         return [(directory / "track.wav", "audio", sum(
-            track["length_sectors"] for track in tracks
+            span_sectors.get(track["number"], track["length_sectors"])
+            for track in tracks
         ), None)]
     return [
         (
             directory / f"track{track['number']:02d}."
             f"{'wav' if track['kind'] == 'audio' else 'iso'}",
             track["kind"],
-            track["length_sectors"],
+            span_sectors.get(track["number"], track["length_sectors"]),
             track["number"],
         )
         for track in tracks
@@ -694,7 +712,7 @@ def pcm_window_hash(path, start_frame, frames):
     return digest.hexdigest()
 
 
-def parity_outputs(manifest, expected, hashes, log_path):
+def parity_outputs(manifest, expected, hashes, log_path, scenario=None):
     try:
         log = log_path.read_text(encoding="utf-8", errors="replace")
         offsets = parse_split_write_offsets(log)
@@ -704,12 +722,16 @@ def parity_outputs(manifest, expected, hashes, log_path):
         ) from exc
 
     outputs = {}
+    start_offsets = {
+        span["track"]: span["start_offset_sectors"]
+        for span in (scenario or {}).get("selected_spans", ())
+    }
     for path, kind, sectors, number in expected:
         track = selected_track(manifest, number)
         write_offset = 0
         if kind == "audio":
-            begin_lba = track["begin_lba"]
-            end_lba = begin_lba + track["length_sectors"]
+            begin_lba = track["begin_lba"] + start_offsets.get(number, 0)
+            end_lba = begin_lba + sectors
             write_offset = state_offset_for_lba(offsets, begin_lba)
             for boundary_lba, _candidate in offsets[1:]:
                 if begin_lba < boundary_lba < end_lba:
@@ -723,23 +745,33 @@ def parity_outputs(manifest, expected, hashes, log_path):
             sectors=sectors,
             digest=hashes[number],
             write_offset=write_offset,
+            start_offset_sectors=start_offsets.get(number, 0),
         )
     return outputs
 
 
 def validate_track_parity(profile, number, outputs):
     kinds = {item.kind for item in outputs}
-    sector_counts = {item.sectors for item in outputs}
-    if len(kinds) != 1 or len(sector_counts) != 1:
+    if len(kinds) != 1:
         raise ValidationError(
             f"Track {number:02d} has inconsistent metadata across {profile} scenarios"
         )
     if kinds == {"data"}:
-        matches = len({item.digest for item in outputs}) == 1
+        matches = (
+            len({item.sectors for item in outputs}) == 1
+            and len({item.digest for item in outputs}) == 1
+        )
     else:
-        frames = outputs[0].sectors * PCM_FRAMES_PER_SECTOR
-        common_start = max(item.write_offset for item in outputs)
-        common_end = min(item.write_offset + frames for item in outputs)
+        starts = [
+            item.start_offset_sectors * PCM_FRAMES_PER_SECTOR + item.write_offset
+            for item in outputs
+        ]
+        ends = [
+            start + item.sectors * PCM_FRAMES_PER_SECTOR
+            for start, item in zip(starts, outputs)
+        ]
+        common_start = max(starts)
+        common_end = min(ends)
         if common_start >= common_end:
             raise ValidationError(
                 f"Track {number:02d} has no comparable PCM across {profile} scenarios"
@@ -747,10 +779,10 @@ def validate_track_parity(profile, number, outputs):
         matches = len({
             pcm_window_hash(
                 item.path,
-                common_start - item.write_offset,
+                common_start - start,
                 common_end - common_start,
             )
-            for item in outputs
+            for item, start in zip(outputs, starts)
         }) == 1
     if not matches:
         raise ValidationError(
@@ -1186,6 +1218,7 @@ def validate_scenario(
         expected,
         separate_hashes,
         separate_dir / "validation.log",
+        scenario,
     )
 
 

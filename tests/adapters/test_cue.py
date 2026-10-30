@@ -120,6 +120,12 @@ class CueAdapterTests(unittest.TestCase):
 
         with self.assertRaisesRegex(CueError, "expected 2"):
             resolver.resolve(Path("."), "disc", [], 0, 2, track_zero_sectors=2)
+        zero_segments, _path, zero_skipped = resolver.resolve(
+            Path("."), "disc", [], 0, 1, track_zero_sectors=1,
+            start_offset=1,
+        )
+        self.assertEqual(zero_segments[0].start_sector, 1)
+        self.assertEqual(zero_skipped, 1)
 
     def test_audio_invalid_sources_and_insufficient_data(self):
         cue = Path("disc.cue")
@@ -147,6 +153,25 @@ class CueAdapterTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(CueError, "additional sectors"):
             resolver.resolve(Path("."), "disc", [], 0, 3, track_zero_sectors=2)
+
+    def test_audio_partial_offset_skips_across_bins(self):
+        cue = Path("disc.cue")
+        tracks = (
+            CueTrack(1, "AUDIO", "one.bin", ((1, 1),)),
+            CueTrack(2, "AUDIO", "two.bin", ((1, 0),)),
+            CueTrack(3, "AUDIO", "three.bin", ((1, 0),)),
+        )
+        resolver = AudioSegmentResolver(
+            self.Locator((cue,)), self.Parser(tracks), bin_sectors=lambda _path: 3
+        )
+        segments, _path, skipped = resolver.resolve(
+            Path("."), "disc", [], 1, 3, start_offset=3
+        )
+        self.assertEqual(
+            [(item.track_number, item.start_sector, item.sectors) for item in segments],
+            [(2, 1, 2), (3, 0, 1)],
+        )
+        self.assertEqual(skipped, 1)
 
     def test_audio_file_size_validation(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -2,7 +2,13 @@
 
 from ..domain.disc import Track, TrackKind
 from ..domain.errors import PlanningError, SelectionError
-from ..domain.extraction import ExtractionPlan, ResolvedSelection, SectorRange
+from ..domain.extraction import (
+    ExtractionPlan,
+    ResolvedSelection,
+    SectorRange,
+    TrackPosition,
+    TrackSpan,
+)
 
 
 END_PADDING_SECTORS = 1
@@ -26,8 +32,8 @@ class ExtractionPlanner:
             raise SelectionError(message)
 
         regular_numbers = [track.number for track in available]
-        explicit_start = requested.start
-        explicit_end = requested.end
+        explicit_start = self._track_number(requested.start)
+        explicit_end = self._track_number(requested.end)
         start = 1 if explicit_start is None else explicit_start
         end = max(regular_numbers) if explicit_end is None else explicit_end
         if start > end:
@@ -60,7 +66,15 @@ class ExtractionPlanner:
                     *selected,
                 )
 
-        return ResolvedSelection(selected)
+        spans = tuple(
+            self._selected_span(
+                track,
+                requested.start if track is selected[0] else None,
+                requested.end if track is selected[-1] else None,
+            )
+            for track in selected
+        )
+        return ResolvedSelection(selected, spans)
 
     def create(self, request, disc, workdir):
         selection = self.resolve(
@@ -71,8 +85,8 @@ class ExtractionPlanner:
         self._validate_output_mode(request, selection)
 
         logical_range = SectorRange(
-            selection.first_track.begin_lba,
-            selection.last_track.end_lba,
+            selection.spans[0].begin_lba,
+            selection.spans[-1].end_lba,
         )
         physical_range = logical_range.with_end_padding(END_PADDING_SECTORS)
         image_name = self._image_name(selection)
@@ -99,6 +113,40 @@ class ExtractionPlanner:
             refine_command=commands.refine(physical_range),
             split_command=commands.split(include_data=has_data),
         )
+
+    @staticmethod
+    def _track_number(endpoint):
+        return (
+            endpoint.track_number
+            if isinstance(endpoint, TrackPosition)
+            else endpoint
+        )
+
+    @staticmethod
+    def _selected_span(track, start_endpoint, end_endpoint):
+        start_lba = track.begin_lba
+        end_lba = track.end_lba
+        if isinstance(start_endpoint, TrackPosition):
+            if track.kind is TrackKind.DATA:
+                raise SelectionError(
+                    "Partial offsets are supported only for audio tracks."
+                )
+            start_lba += start_endpoint.offset_sectors
+        if isinstance(end_endpoint, TrackPosition):
+            if track.kind is TrackKind.DATA:
+                raise SelectionError(
+                    "Partial offsets are supported only for audio tracks."
+                )
+            end_lba = track.begin_lba + end_endpoint.offset_sectors + 1
+        if start_lba >= track.end_lba or end_lba > track.end_lba:
+            raise SelectionError(
+                f"Offset lies outside Track {track.number}."
+            )
+        if end_lba <= start_lba:
+            raise SelectionError(
+                f"The selected range within Track {track.number} is empty or reversed."
+            )
+        return TrackSpan(track, SectorRange(start_lba, end_lba))
 
     def _requested_track(self, tracks, number, audio_only):
         if number == 0:

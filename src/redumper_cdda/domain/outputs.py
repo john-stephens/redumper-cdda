@@ -51,6 +51,7 @@ class OutputPlan:
     component_tracks: tuple
     expected_sectors: int
     output_path: Path
+    component_spans: tuple = ()
 
 
 @dataclass(frozen=True)

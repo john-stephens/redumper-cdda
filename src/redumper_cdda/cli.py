@@ -19,7 +19,7 @@ from .domain.errors import (
     TerminationRequested,
 )
 from .domain.events import LifecycleEvent
-from .domain.extraction import ExtractionRequest, TrackSelection
+from .domain.extraction import ExtractionRequest, TrackPosition, TrackSelection
 
 
 DEFAULT_REFINE_PASSES = 3
@@ -45,8 +45,8 @@ class ArgumentParserFactory:
             "track", type=self.track_selection, nargs="?",
             default=TrackSelection(), metavar="TRACK",
             help=(
-                "track selection: N, N-M, -M, N-, or - for the full disc "
-                "(default: full disc)"
+                "track selection: N, N-M, -M, N-, -, or cdparanoia-style "
+                "N[hh:mm:ss.ff]-M[hh:mm:ss.ff] (default: full disc)"
             ),
         )
         parser.add_argument(
@@ -132,15 +132,70 @@ class ArgumentParserFactory:
     def track_selection(value):
         if value == "-":
             return TrackSelection()
+        if value.count("-") > 1:
+            raise ArgumentParserFactory._track_error()
+        if "-" in value:
+            start_text, end_text = value.split("-", 1)
+            return TrackSelection(
+                ArgumentParserFactory._selection_endpoint(start_text),
+                ArgumentParserFactory._selection_endpoint(end_text),
+            )
+        endpoint = ArgumentParserFactory._selection_endpoint(value)
+        if endpoint is None:
+            raise ArgumentParserFactory._track_error()
+        if isinstance(endpoint, TrackPosition):
+            return TrackSelection(endpoint, endpoint.track_number)
+        return TrackSelection(endpoint, endpoint)
+
+    @staticmethod
+    def _selection_endpoint(value):
+        if not value:
+            return None
+        match = re.fullmatch(r"(\d+):?\[([^]]+)\]", value)
+        if match:
+            return TrackPosition(
+                int(match.group(1)),
+                ArgumentParserFactory._offset_sectors(match.group(2)),
+            )
         if re.fullmatch(r"\d+", value):
-            number = int(value)
-            return TrackSelection(number, number)
-        match = re.fullmatch(r"(\d*)-(\d*)", value)
-        if not match:
-            raise argparse.ArgumentTypeError("track must be N, N-M, -M, N-, or -")
-        return TrackSelection(
-            int(match.group(1)) if match.group(1) else None,
-            int(match.group(2)) if match.group(2) else None,
+            return int(value)
+        raise ArgumentParserFactory._track_error()
+
+    @staticmethod
+    def _offset_sectors(value):
+        if not re.fullmatch(r"[0-9:.]+", value) or not any(
+            character.isdigit() for character in value
+        ):
+            raise ArgumentParserFactory._track_error()
+        if value.count(".") > 1:
+            raise ArgumentParserFactory._track_error()
+        if "." in value:
+            time_text, sector_text = value.split(".", 1)
+            sectors = int(sector_text or 0)
+        else:
+            time_text = value
+            sectors = 0
+        fields = time_text.split(":")
+        if len(fields) > 3 or any(
+            field and not field.isdigit() for field in fields
+        ):
+            raise ArgumentParserFactory._track_error()
+        values = [int(field or 0) for field in fields]
+        if len(values) == 1:
+            hours, minutes, seconds = 0, 0, values[0]
+        elif len(values) == 2:
+            hours, minutes, seconds = 0, values[0], values[1]
+        else:
+            hours, minutes, seconds = values
+        if seconds >= 60 or sectors >= 75 or (len(values) == 3 and minutes >= 60):
+            raise ArgumentParserFactory._track_error()
+        return (((hours * 60) + minutes) * 60 + seconds) * 75 + sectors
+
+    @staticmethod
+    def _track_error():
+        return argparse.ArgumentTypeError(
+            "track must be N, N-M, -M, N-, -, or use "
+            "N[hh:mm:ss.ff]-M[hh:mm:ss.ff] offsets"
         )
 
     @staticmethod

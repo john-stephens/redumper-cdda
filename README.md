@@ -300,6 +300,30 @@ redumper-cdda /dev/sg4 3-     # Track 3 through the final track
 redumper-cdda /dev/sg4 0-3    # Track 0 through Track 3
 ```
 
+Selections may also use cdparanoia-style track-relative offsets. Quote these
+arguments so the shell does not interpret the brackets:
+
+``` bash
+redumper-cdda /dev/sg4 "2[1:30]"
+redumper-cdda /dev/sg4 "1[:30.12]-2[1:10]"
+redumper-cdda /dev/sg4 "-2[30.35]"
+redumper-cdda /dev/sg4 "2[30]-"
+```
+
+Offsets use `[hours:minutes:seconds.sectors]` with 75 sectors per second.
+Leading zero fields may be omitted: `[20]`, `[:20]`, and `[::20]` mean twenty
+seconds; `[.30]` means thirty sectors; and `[10:]` means ten minutes. The
+offset is relative to the named track's logical beginning (INDEX 01 for Tracks
+1 and above, or LBA 0 for Track 0). An explicit ending offset is inclusive, so
+`"2[.10]-2[.20]"` contains eleven sectors. A lone offset is a starting offset
+and continues through the end of that track.
+
+Partial offsets are audio-only. With `--include-data`, complete data tracks may
+occur inside a partial audio range, but an offset cannot be attached to a data
+track because a clipped data track cannot produce the required complete,
+validated ISO filesystem. AccurateRip skips clipped tracks while continuing to
+verify any complete numbered audio tracks inside the selection.
+
 Omitting the selection defaults to `-`, which selects the full disc from
 Track 1 through the final numbered track. An open-start range such as `-3`
 also begins at Track 1 and does not include Track 0. Track 0 must be requested

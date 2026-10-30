@@ -15,6 +15,18 @@ class TrackSelection:
 
 
 @dataclass(frozen=True)
+class TrackPosition:
+    """A track-relative sector position supplied by the CLI."""
+
+    track_number: int
+    offset_sectors: int
+
+    def __post_init__(self):
+        if self.track_number < 0 or self.offset_sectors < 0:
+            raise DomainModelError("Track positions cannot be negative.")
+
+
+@dataclass(frozen=True)
 class SectorRange:
     start_lba: int
     end_lba: int
@@ -34,12 +46,72 @@ class SectorRange:
 
 
 @dataclass(frozen=True)
+class TrackSpan:
+    """The exact half-open logical range selected from one track."""
+
+    track: object
+    logical_range: SectorRange
+
+    def __post_init__(self):
+        if (
+            self.logical_range.start_lba < self.track.begin_lba
+            or self.logical_range.end_lba > self.track.end_lba
+        ):
+            raise DomainModelError(
+                f"Selected span for Track {self.track.number} lies outside the track."
+            )
+
+    @property
+    def number(self):
+        return self.track.number
+
+    @property
+    def kind(self):
+        return self.track.kind
+
+    @property
+    def begin_lba(self):
+        return self.logical_range.start_lba
+
+    @property
+    def end_lba(self):
+        return self.logical_range.end_lba
+
+    @property
+    def length_sectors(self):
+        return self.logical_range.sectors
+
+    @property
+    def start_offset_sectors(self):
+        return self.begin_lba - self.track.begin_lba
+
+    @property
+    def is_full_track(self):
+        return (
+            self.begin_lba == self.track.begin_lba
+            and self.end_lba == self.track.end_lba
+        )
+
+
+@dataclass(frozen=True)
 class ResolvedSelection:
     tracks: tuple
+    spans: tuple = ()
 
     def __post_init__(self):
         if not self.tracks:
             raise DomainModelError("A resolved selection cannot be empty.")
+        if not self.spans:
+            object.__setattr__(
+                self,
+                "spans",
+                tuple(
+                    TrackSpan(track, SectorRange(track.begin_lba, track.end_lba))
+                    for track in self.tracks
+                ),
+            )
+        if tuple(span.track for span in self.spans) != self.tracks:
+            raise DomainModelError("Resolved tracks and selected spans must agree.")
 
     @property
     def first_track(self):
@@ -51,7 +123,7 @@ class ResolvedSelection:
 
     @property
     def output_sectors(self):
-        return sum(track.length_sectors for track in self.tracks)
+        return sum(span.length_sectors for span in self.spans)
 
 
 @dataclass(frozen=True)

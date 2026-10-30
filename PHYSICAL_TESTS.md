@@ -207,6 +207,21 @@ Expected:
 -   SHA-256 hashes of the source dump and all sidecars remain unchanged.
 -   Q is reported as unavailable rather than zero.
 
+### A08 - Partial-track endpoints
+
+``` bash
+redumper-cdda /dev/sg4 "2[.10]-2[.20]"
+```
+
+Expected:
+
+-   One bounded dump reads Track 2 offsets 10 through 20 inclusive, followed
+    by the required one-sector endpoint padding.
+-   One force-split operation runs.
+-   `track02.wav` contains exactly 11 sectors / 25,872 PCM bytes.
+-   Its PCM exactly matches sectors 10 through 20 of the A02 Track 2 output.
+-   The padding sector is absent and AccurateRip skips the clipped track.
+
 ## B. Audio CD with a Track 1 pregap
 
 Use a disc for which cdparanoia reports Track 1 beginning above LBA 0. Record

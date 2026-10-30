@@ -6,6 +6,7 @@ from redumper_cdda.adapters.accuraterip import AccurateRipVerifier, NullVerifier
 from redumper_cdda.domain.disc import DiscLayout, Track, TrackKind
 from redumper_cdda.domain.errors import VerificationError
 from redumper_cdda.domain.outputs import AudioSegment, SplitResult, VerificationTrack
+from redumper_cdda.domain.extraction import ResolvedSelection, SectorRange, TrackSpan
 
 
 class AccurateRipVerifierTests(unittest.TestCase):
@@ -71,6 +72,17 @@ class AccurateRipVerifierTests(unittest.TestCase):
         verifier = NullVerifier()
         self.assertIsNone(verifier.prepare(object()))
         self.assertIsNone(verifier.verify(object(), object(), Path("/work")))
+
+    def test_partial_only_selection_disables_verification(self):
+        track = Track(1, TrackKind.AUDIO, 0, 0, 10)
+        span = TrackSpan(track, SectorRange(1, 9))
+        plan = SimpleNamespace(
+            disc=DiscLayout((track,), 10),
+            selection=ResolvedSelection((track,), (span,)),
+        )
+        verifier = self.verifier(lambda *_args: None)
+        verifier.prepare(plan)
+        self.assertFalse(verifier.enabled)
 
 
 if __name__ == "__main__":

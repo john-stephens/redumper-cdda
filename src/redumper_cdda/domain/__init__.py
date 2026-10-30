@@ -29,7 +29,9 @@ from .extraction import (
     ExtractionResult,
     ResolvedSelection,
     SectorRange,
+    TrackPosition,
     TrackSelection,
+    TrackSpan,
 )
 from .integrity import MediaErrors, TrackMediaErrors, WriteOffsetMap
 from .outputs import (
@@ -86,6 +88,8 @@ __all__ = [
     "TrackMediaErrors",
     "TrackKind",
     "TrackSelection",
+    "TrackPosition",
+    "TrackSpan",
     "VerificationError",
     "TerminationRequested",
     "VerificationReport",

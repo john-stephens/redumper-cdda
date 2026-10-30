@@ -111,6 +111,7 @@ class AudioSegmentResolver:
         requested_track,
         expected_sectors,
         track_zero_sectors=None,
+        start_offset=0,
     ):
         generated_cues = self._locator.locate(workdir, image_name, changed)
         if not generated_cues:
@@ -123,6 +124,7 @@ class AudioSegmentResolver:
                     requested_track,
                     expected_sectors,
                     track_zero_sectors,
+                    start_offset,
                 )
             except Exception as exc:
                 errors.append(f"{cue_path}: {exc}")
@@ -132,7 +134,12 @@ class AudioSegmentResolver:
         )
 
     def _resolve_cue(
-        self, cue_path, requested_track, expected_sectors, track_zero_sectors
+        self,
+        cue_path,
+        requested_track,
+        expected_sectors,
+        track_zero_sectors,
+        start_offset,
     ):
         cue_tracks = self._parser.parse(cue_path)
         cue_track_number = 1 if requested_track == 0 else requested_track
@@ -162,6 +169,7 @@ class AudioSegmentResolver:
             )
         segments = []
         remaining = expected_sectors
+        skip = start_offset
         for relative_index, cue_track in enumerate(cue_tracks[start_index:]):
             if cue_track.track_type != "AUDIO" or not cue_track.file_name:
                 break
@@ -178,6 +186,12 @@ class AudioSegmentResolver:
             )
             if start_sector > total_available:
                 break
+            available = total_available - start_sector
+            skipped_here = min(skip, available)
+            start_sector += skipped_here
+            skip -= skipped_here
+            if skip:
+                continue
             take = min(total_available - start_sector, remaining)
             if take > 0:
                 segments.append(
@@ -194,7 +208,7 @@ class AudioSegmentResolver:
                 return (
                     tuple(segments),
                     cue_path,
-                    0 if requested_track == 0 else selected_start,
+                    segments[0].start_sector,
                 )
         raise CueError(f"{remaining:,} additional sectors required")
 

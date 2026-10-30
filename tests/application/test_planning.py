@@ -6,7 +6,11 @@ from redumper_cdda.application.planning import ExtractionPlanner
 from redumper_cdda.application.output import OutputPlanner
 from redumper_cdda.domain.disc import DiscLayout, Track, TrackKind
 from redumper_cdda.domain.errors import PlanningError, SelectionError
-from redumper_cdda.domain.extraction import ExtractionRequest, TrackSelection
+from redumper_cdda.domain.extraction import (
+    ExtractionRequest,
+    TrackPosition,
+    TrackSelection,
+)
 
 
 class ExtractionPlannerTests(unittest.TestCase):
@@ -126,6 +130,14 @@ class ExtractionPlannerTests(unittest.TestCase):
             ).tracks],
             [0, 1, 2],
         )
+        partial = self.planner.resolve(
+            disc,
+            TrackSelection(TrackPosition(0, 10), TrackPosition(0, 19)),
+        )
+        self.assertEqual(
+            (partial.spans[0].begin_lba, partial.spans[0].end_lba),
+            (10, 20),
+        )
 
     def test_track_zero_rejects_invalid_track_one_layouts(self):
         zero_start = self.track(1, begin=0, end=100)
@@ -216,6 +228,74 @@ class ExtractionPlannerTests(unittest.TestCase):
             Path("/tmp/work"),
         )
         self.assertEqual(valid.outputs[0].kind.value, "data")
+
+    def test_partial_audio_endpoints_create_exact_padded_span_outputs(self):
+        disc = self.audio_disc()
+        request = self.request(
+            TrackSelection(TrackPosition(1, 10), TrackPosition(2, 19))
+        )
+        plan = self.planner.create(request, disc, Path("/tmp/work"))
+
+        self.assertEqual(plan.logical_start_lba, 110)
+        self.assertEqual(plan.logical_end_lba, 220)
+        self.assertEqual(plan.dump_end_lba, 221)
+        self.assertEqual(
+            [(span.begin_lba, span.end_lba) for span in plan.selection.spans],
+            [(110, 200), (200, 220)],
+        )
+        self.assertEqual(plan.expected_sectors, 110)
+        self.assertEqual(
+            [output.expected_sectors for output in plan.outputs], [90, 20]
+        )
+        self.assertEqual(plan.outputs[0].component_spans, (plan.selection.spans[0],))
+
+    def test_single_partial_offset_runs_to_track_end_and_inclusive_end_is_one_sector(self):
+        disc = self.audio_disc()
+        through_end = self.planner.create(
+            self.request(TrackSelection(TrackPosition(2, 25), 2)),
+            disc,
+            Path("/tmp/work"),
+        )
+        self.assertEqual(
+            (through_end.logical_start_lba, through_end.logical_end_lba),
+            (225, 300),
+        )
+        one = self.planner.create(
+            self.request(
+                TrackSelection(TrackPosition(2, 25), TrackPosition(2, 25))
+            ),
+            disc,
+            Path("/tmp/work"),
+        )
+        self.assertEqual(one.logical_range.sectors, 1)
+        self.assertEqual(one.outputs[0].expected_sectors, 1)
+
+    def test_partial_offset_validation_and_data_rejection(self):
+        disc = self.audio_disc()
+        invalid = (
+            (TrackPosition(1, 100), 1, "outside"),
+            (TrackPosition(1, 20), TrackPosition(1, 10), "empty or reversed"),
+        )
+        for start, end, message in invalid:
+            with self.subTest(start=start, end=end), self.assertRaisesRegex(
+                SelectionError, message
+            ):
+                self.planner.resolve(disc, TrackSelection(start, end))
+
+        data = self.track(1, TrackKind.DATA)
+        data_disc = DiscLayout((data,), data.end_lba)
+        with self.assertRaisesRegex(SelectionError, "only for audio"):
+            self.planner.resolve(
+                data_disc,
+                TrackSelection(TrackPosition(1, 0), 1),
+                include_data=True,
+            )
+        with self.assertRaisesRegex(SelectionError, "only for audio"):
+            self.planner.resolve(
+                data_disc,
+                TrackSelection(1, TrackPosition(1, 0)),
+                include_data=True,
+            )
 
 
 if __name__ == "__main__":

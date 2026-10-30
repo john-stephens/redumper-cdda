@@ -32,6 +32,7 @@ from redumper_cdda.application.planning import ExtractionPlanner  # noqa: E402
 from redumper_cdda.domain.disc import TrackKind  # noqa: E402
 from redumper_cdda.domain.extraction import (  # noqa: E402
     ExtractionRequest,
+    TrackPosition,
     TrackSelection,
 )
 from redumper_cdda.integrity import (  # noqa: E402
@@ -73,6 +74,7 @@ class Scenario:
     required_write_offset_sign: int = 0
     omitted_alignment_track: object = None
     fabricated_c2_track: object = None
+    selection_text: object = None
 
 
 def now():
@@ -206,6 +208,12 @@ def scenarios_for(
             ),
             Scenario("a05-through-03", ("A05 -3",), TrackSelection(None, 3)),
             Scenario("a05-from-02", ("A05 2-",), TrackSelection(2, None)),
+            Scenario(
+                "a08-partial-track-02",
+                ("A08 partial track",),
+                TrackSelection(TrackPosition(2, 10), TrackPosition(2, 20)),
+                selection_text="2[.10]-2[.20]",
+            ),
         )
     if profile == "track0-pregap":
         if not audio or len(audio) != len(tracks) or tracks[0].begin_lba <= 0:
@@ -600,6 +608,15 @@ def capture(args):
                 "cdparanoia_toc_file": "cdparanoia-toc.txt",
                 "selected_tracks": [
                     track.number for track in plan.selection.tracks
+                ],
+                "selection": scenario.selection_text,
+                "selected_spans": [
+                    {
+                        "track": span.number,
+                        "start_offset_sectors": span.start_offset_sectors,
+                        "sectors": span.length_sectors,
+                    }
+                    for span in plan.selection.spans
                 ],
                 "include_data": scenario.include_data,
                 "logical_start_lba": plan.logical_start_lba,

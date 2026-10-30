@@ -43,6 +43,34 @@ For a range, `logical_start` is the first selected track's start and
 that complete physical range once, with the same one-sector endpoint
 padding used for a single track.
 
+### Partial-track offsets
+
+Track endpoints may include a cdparanoia-style relative offset such as
+`1[:30.12]-2[1:10]`. The offset is measured from the track's reconciled logical
+beginning. User-facing end offsets are inclusive and are normalized immediately
+to the application's half-open sector convention:
+
+``` text
+selected_start       = track begin + start offset
+selected_end         = track begin + end offset + 1
+dump_start           = selected_start
+dump_end             = selected_end + 1
+```
+
+The first and last output spans are clipped to those boundaries; complete
+interior tracks retain their established boundaries. Separate output writes a
+clipped WAV for each partial boundary track, while single-file audio output
+concatenates the same selected spans. CUE resolution skips from INDEX 01 across
+as many AUDIO BINs as necessary and still requires exactly the planned sector
+count. This preserves following-track pregap semantics even when an offset lies
+inside that pregap.
+
+Offsets must identify an existing sector within their named track. Track 0
+offsets are relative to LBA 0. Data-track offsets are rejected; complete data
+tracks inside a partial audio range retain the normal ISO conversion and
+validation rules. AccurateRip checks only complete numbered audio tracks and
+skips clipped tracks.
+
 A bare `-` selects Track 1 through the final numbered track, and omitting the
 selection is equivalent to `-`. As with other open ranges, data tracks are
 omitted unless `--include-data` is active. Track 0 is never implicit.

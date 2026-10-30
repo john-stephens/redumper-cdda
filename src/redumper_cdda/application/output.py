@@ -16,8 +16,11 @@ class OutputPlanner:
 
     def create(self, selection, request):
         tracks = selection.tracks
+        spans = selection.spans
         if not request.single_file:
-            return tuple(self._separate(track, request.prefix) for track in tracks)
+            return tuple(
+                self._separate(span, request.prefix) for span in spans
+            )
         if len(tracks) > 1 and any(
             track.kind is TrackKind.DATA for track in tracks
         ):
@@ -29,7 +32,16 @@ class OutputPlanner:
             path = self._requested_or_default(
                 request.output, f"{request.prefix}{first.number:02d}.iso"
             )
-            return (OutputPlan(first, OutputKind.DATA, (), first.length_sectors, path),)
+            return (
+                OutputPlan(
+                    first,
+                    OutputKind.DATA,
+                    (),
+                    spans[0].length_sectors,
+                    path,
+                    (spans[0],),
+                ),
+            )
         path = self._requested_or_default(
             request.output,
             (
@@ -43,12 +55,14 @@ class OutputPlanner:
                 None,
                 OutputKind.AUDIO,
                 tracks,
-                sum(track.length_sectors for track in tracks),
+                sum(span.length_sectors for span in spans),
                 path,
+                spans,
             ),
         )
 
-    def _separate(self, track, prefix):
+    def _separate(self, span, prefix):
+        track = span.track
         kind = (
             OutputKind.DATA if track.kind is TrackKind.DATA else OutputKind.AUDIO
         )
@@ -57,8 +71,9 @@ class OutputPlanner:
             track,
             kind,
             (track,) if kind is OutputKind.AUDIO else (),
-            track.length_sectors,
+            span.length_sectors,
             (self._directory / f"{prefix}{track.number:02d}.{extension}").resolve(),
+            (span,),
         )
 
     def _requested_or_default(self, requested, default_name):

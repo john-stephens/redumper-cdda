@@ -44,7 +44,7 @@ class CapturePhysicalTestDataTests(unittest.TestCase):
             track(1, TrackKind.DATA, 0, 100),
             track(2, TrackKind.DATA, 100, 200),
         )
-        self.assertEqual(len(capture.scenarios_for("regular-audio", audio)), 6)
+        self.assertEqual(len(capture.scenarios_for("regular-audio", audio)), 7)
         self.assertEqual(len(capture.scenarios_for("track0-pregap", pregap)), 5)
         self.assertEqual(len(capture.scenarios_for("data-first", data_first)), 4)
         data_last_scenarios = capture.scenarios_for("data-last", data_last)
@@ -57,6 +57,12 @@ class CapturePhysicalTestDataTests(unittest.TestCase):
         self.assertEqual(len(data_scenarios), 2)
         self.assertTrue(all(item.include_data for item in data_scenarios))
         regular_scenarios = capture.scenarios_for("regular-audio", audio)
+        partial = next(
+            item for item in regular_scenarios
+            if item.name == "a08-partial-track-02"
+        )
+        self.assertEqual(partial.selection_text, "2[.10]-2[.20]")
+        self.assertEqual(partial.selection.start.offset_sectors, 10)
         fabricated = {
             item.name: item.fabricated_c2_track
             for item in regular_scenarios

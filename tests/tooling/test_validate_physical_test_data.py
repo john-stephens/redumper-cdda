@@ -102,6 +102,16 @@ class ValidatePhysicalTestDataTests(unittest.TestCase):
             self.assertEqual(command[1], "1")
             self.assertIn("--no-accuraterip", command)
             self.assertNotIn("--include-data", command)
+            partial_scenario = {
+                **manifest["scenarios"][0],
+                "selection": "1[.10]-1[.20]",
+            }
+            self.assertEqual(
+                validate.extraction_command(
+                    Path("/tool"), profile, partial_scenario, output
+                )[1],
+                "1[.10]-1[.20]",
+            )
             self.assertNotIn(
                 "--no-accuraterip",
                 validate.extraction_command(
@@ -141,6 +151,16 @@ class ValidatePhysicalTestDataTests(unittest.TestCase):
         output = Path("/tmp/output")
         expected = validate.expected_outputs(manifest, scenario, output)
         self.assertEqual([item[0].name for item in expected], ["track01.wav", "track02.iso"])
+        partial = {
+            **manifest["scenarios"][0],
+            "selected_spans": [
+                {"track": 1, "start_offset_sectors": 2, "sectors": 3}
+            ],
+        }
+        self.assertEqual(
+            validate.expected_outputs(manifest, partial, output)[0][2], 3
+        )
+        self.assertEqual(validate.accuraterip_tracks(manifest, partial), ())
 
     def test_wav_and_iso_content_validation(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -247,12 +267,46 @@ class ValidatePhysicalTestDataTests(unittest.TestCase):
                 [(shifted, "audio", 2, 1)],
                 {1: "digest"},
                 log,
+                {
+                    "selected_spans": [
+                        {
+                            "track": 1,
+                            "start_offset_sectors": 3,
+                            "sectors": 2,
+                        }
+                    ]
+                },
             )
             self.assertEqual(parsed[1].write_offset, 2)
+            self.assertEqual(parsed[1].start_offset_sectors, 3)
 
             shifted.write_bytes(first.read_bytes())
             with self.assertRaisesRegex(validate.ValidationError, "differs"):
                 validate.validate_track_parity("synthetic", 7, outputs)
+
+            long_frames = [
+                index.to_bytes(4, "little")
+                for index in range(3 * validate.PCM_FRAMES_PER_SECTOR)
+            ]
+            full = write("full.wav", long_frames)
+            partial = write(
+                "partial.wav",
+                long_frames[
+                    validate.PCM_FRAMES_PER_SECTOR:
+                    2 * validate.PCM_FRAMES_PER_SECTOR
+                ],
+            )
+            validate.validate_track_parity(
+                "synthetic",
+                7,
+                [
+                    validate.ParityOutput(full, "audio", 3, "unused"),
+                    validate.ParityOutput(
+                        partial,
+                        "audio", 1, "unused", start_offset_sectors=1,
+                    ),
+                ],
+            )
 
     def test_data_parity_remains_an_exact_hash_comparison(self):
         matching = [

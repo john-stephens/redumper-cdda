@@ -9,6 +9,8 @@ from redumper_cdda.domain.extraction import (
     ExtractionResult,
     ResolvedSelection,
     SectorRange,
+    TrackPosition,
+    TrackSpan,
 )
 from redumper_cdda.domain.integrity import MediaErrors
 
@@ -51,6 +53,24 @@ class ExtractionDomainTests(unittest.TestCase):
             sector_range.with_end_padding(-1)
         with self.assertRaisesRegex(DomainModelError, "cannot be empty"):
             ResolvedSelection(())
+
+    def test_partial_track_position_and_span_invariants(self):
+        position = TrackPosition(1, 3)
+        self.assertEqual(position.offset_sectors, 3)
+        span = TrackSpan(self.first, SectorRange(102, 106))
+        selection = ResolvedSelection((self.first,), (span,))
+        self.assertEqual(selection.output_sectors, 4)
+        self.assertEqual(span.start_offset_sectors, 2)
+        self.assertEqual(span.number, 1)
+        self.assertIs(span.kind, TrackKind.AUDIO)
+        self.assertFalse(span.is_full_track)
+        self.assertTrue(ResolvedSelection((self.first,)).spans[0].is_full_track)
+        with self.assertRaisesRegex(DomainModelError, "negative"):
+            TrackPosition(-1, 0)
+        with self.assertRaisesRegex(DomainModelError, "outside"):
+            TrackSpan(self.first, SectorRange(99, 101))
+        with self.assertRaisesRegex(DomainModelError, "must agree"):
+            ResolvedSelection((self.first,), (TrackSpan(self.second, SectorRange(110, 120)),))
 
     def test_plan_properties_and_results(self):
         plan = self.make_plan()

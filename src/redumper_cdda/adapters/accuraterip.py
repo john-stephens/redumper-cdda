@@ -13,9 +13,12 @@ class AccurateRipVerifier(Verifier):
         self._verifier = verifier
 
     def prepare(self, plan):
+        items = getattr(plan.selection, "spans", plan.selection.tracks)
         if not any(
-            track.kind is TrackKind.AUDIO and track.number != 0
-            for track in plan.selection.tracks
+            getattr(item, "track", item).kind is TrackKind.AUDIO
+            and getattr(item, "track", item).number != 0
+            and getattr(item, "is_full_track", True)
+            for item in items
         ):
             self.enabled = False
             return

@@ -35,8 +35,8 @@ values, and exact external command arrays remain independently testable.
 events, and typed errors:
 
 -   `disc.py`: `Track`, `TrackKind`, `DiscLayout`, and `AudioLayout`;
--   `extraction.py`: requests, selections, sector ranges, plans, and extraction
-    results;
+-   `extraction.py`: requests, track-relative positions, exact selected track
+    spans, sector ranges, plans, and extraction results;
 -   `integrity.py`: disc- and track-level media-error values and write offsets;
 -   `outputs.py`: output plans, resolved sources, completed outputs, and
     verification results;
@@ -57,6 +57,12 @@ physical_range.end_lba   == logical_range.end_lba + 1
 The one-sector physical padding belongs only to redumper dump/refine commands.
 Output assembly consumes resolved logical segments and cannot include that
 padding accidentally.
+
+`ResolvedSelection` retains the participating `Track` values and pairs each
+with a `TrackSpan`. Whole-track selections use the complete reconciled track
+range; partial endpoints clip only their boundary spans. Output sizing,
+integrity inspection, progress, and CUE source resolution consume spans so a
+clipped output is never silently expanded back to a whole track.
 
 ### Application services
 

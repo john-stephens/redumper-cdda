@@ -209,15 +209,18 @@ class VerboseReporter:
         self._output(f"\n+ {quoted}\n")
 
     def _plan(self, values):
-        for track in values["plan"].selection.tracks:
+        selection = values["plan"].selection
+        for span in getattr(selection, "spans", selection.tracks):
+            track = getattr(span, "track", span)
             self._output(
                 "\nSelected track\n--------------\n"
                 f"Track:               {track.number:02d}\n"
                 f"Type:                {track.kind.value}\n"
-                f"Begin LBA:           {track.begin_lba}\n"
-                f"Length:              {track.length_sectors:,} sectors\n"
+                f"Track begin LBA:     {track.begin_lba}\n"
+                f"Selected begin LBA:  {span.begin_lba}\n"
+                f"Selected length:     {span.length_sectors:,} sectors\n"
                 f"Length (MSF):        {track.length_msf}\n"
-                f"Logical end LBA:     {track.end_lba} [exclusive]"
+                f"Selected end LBA:    {span.end_lba} [exclusive]"
             )
 
     def _refinement(self, values):

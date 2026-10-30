@@ -15,7 +15,7 @@ from unittest import mock
 from redumper_cdda import cli
 from redumper_cdda.domain.disc import DiscLayout, Track, TrackKind
 from redumper_cdda.domain.errors import DependencyError, LayoutError
-from redumper_cdda.domain.extraction import TrackSelection
+from redumper_cdda.domain.extraction import TrackPosition, TrackSelection
 
 
 class ArgumentParserFactoryTests(unittest.TestCase):
@@ -62,6 +62,39 @@ class ArgumentParserFactoryTests(unittest.TestCase):
         ):
             self.assertIn(option, help_text)
         self.assertIn("0 means unlimited", help_text)
+
+    def test_cdparanoia_style_track_offsets(self):
+        parse = cli.ArgumentParserFactory.track_selection
+        self.assertEqual(
+            parse("1[:30.12]-2[1:10]"),
+            TrackSelection(TrackPosition(1, 2262), TrackPosition(2, 5250)),
+        )
+        self.assertEqual(
+            parse("2:[20.35]"),
+            TrackSelection(TrackPosition(2, 1535), 2),
+        )
+        self.assertEqual(
+            parse("-2[.30]"),
+            TrackSelection(None, TrackPosition(2, 30)),
+        )
+        self.assertEqual(
+            parse("2[10:]-"),
+            TrackSelection(TrackPosition(2, 45000), None),
+        )
+        for text in ("1[::20]", "1[:20]", "1[20]", "1[20.]", "1[.30]"):
+            with self.subTest(text=text):
+                self.assertIsInstance(parse(text).start, TrackPosition)
+        self.assertEqual(parse("1[::20]").start.offset_sectors, 1500)
+        self.assertEqual(parse("1[.30]").start.offset_sectors, 30)
+
+        invalid = (
+            "1[]", "1[bad]", "1[1:2:3:4]", "1[1.2.3]",
+            "1[60]", "1[1:60]", "1[1:60:00]", "1[.75]",
+            "1[1]-2[2]-3", "[.30]", "",
+        )
+        for text in invalid:
+            with self.subTest(text=text), self.assertRaises(argparse.ArgumentTypeError):
+                parse(text)
 
 
 class SystemDependencyCheckerTests(unittest.TestCase):

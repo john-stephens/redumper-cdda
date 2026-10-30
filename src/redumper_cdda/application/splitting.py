@@ -142,7 +142,7 @@ class SplitService:
         offsets = self._integrity_parser.write_offsets(split_output)
         return self._state_inspector.inspect(
             plan.workdir / f"{plan.image_name}.state",
-            plan.selection.tracks,
+            getattr(plan.selection, "spans", plan.selection.tracks),
             offsets,
         )
 
@@ -168,17 +168,27 @@ class SplitService:
         outputs = []
         resolved_audio = {}
 
-        def resolve_audio(track):
-            if track.number not in resolved_audio:
-                resolved_audio[track.number] = self._audio_resolver.resolve(
+        def selected_track(item):
+            return getattr(item, "track", item)
+
+        def resolve_audio(item):
+            track = selected_track(item)
+            expected_sectors = getattr(item, "length_sectors", track.length_sectors)
+            start_offset = getattr(item, "start_offset_sectors", 0)
+            key = (track.number, start_offset, expected_sectors)
+            if key not in resolved_audio:
+                options = {"track_zero_sectors": track_zero_sectors}
+                if start_offset:
+                    options["start_offset"] = start_offset
+                resolved_audio[key] = self._audio_resolver.resolve(
                     plan.workdir,
                     plan.image_name,
                     changed,
                     track.number,
-                    track.length_sectors,
-                    track_zero_sectors=track_zero_sectors,
+                    expected_sectors,
+                    **options,
                 )
-            return resolved_audio[track.number]
+            return resolved_audio[key]
 
         for output in output_plans:
             if output.kind is OutputKind.DATA:
@@ -200,8 +210,9 @@ class SplitService:
             segments = []
             cue_path = None
             pregap = None
-            for track in output.component_tracks:
-                component, cue_path, skipped = resolve_audio(track)
+            components = output.component_spans or output.component_tracks
+            for component_span in components:
+                component, cue_path, skipped = resolve_audio(component_span)
                 segments.extend(component)
                 if pregap is None:
                     pregap = skipped
@@ -211,23 +222,28 @@ class SplitService:
 
         verification = []
         if accuraterip:
+            selection_items = getattr(plan.selection, "spans", plan.selection.tracks)
             selected_audio = tuple(
-                track
-                for track in plan.selection.tracks
-                if track.number != 0 and track.kind is TrackKind.AUDIO
+                item
+                for item in selection_items
+                if selected_track(item).number != 0
+                and selected_track(item).kind is TrackKind.AUDIO
             )
             selected_indexes = {
-                track.number: index for index, track in enumerate(selected_audio)
+                selected_track(item).number: index
+                for index, item in enumerate(selected_audio)
             }
-            verification_tracks = (
-                track
+            verification_items = (
+                item
                 for output in output_plans
                 if output.kind is OutputKind.AUDIO
-                for track in output.component_tracks
-                if track.number != 0
+                for item in (output.component_spans or output.component_tracks)
+                if selected_track(item).number != 0
+                and getattr(item, "is_full_track", True)
             )
-            for track in verification_tracks:
-                component, _cue_path, _skipped = resolve_audio(track)
+            for item in verification_items:
+                track = selected_track(item)
+                component, _cue_path, _skipped = resolve_audio(item)
                 write_offset = (
                     verification_offsets.offset_for_lba(track.begin_lba)
                     if verification_offsets is not None
@@ -237,19 +253,21 @@ class SplitService:
                 following = ()
                 index = selected_indexes[track.number]
                 if write_offset > 0 and index > 0:
-                    neighbor = selected_audio[index - 1]
+                    neighbor_item = selected_audio[index - 1]
+                    neighbor = selected_track(neighbor_item)
                     if (
                         verification_offsets.offset_for_lba(neighbor.begin_lba)
                         == write_offset
                     ):
-                        preceding = resolve_audio(neighbor)[0]
+                        preceding = resolve_audio(neighbor_item)[0]
                 elif write_offset < 0 and index + 1 < len(selected_audio):
-                    neighbor = selected_audio[index + 1]
+                    neighbor_item = selected_audio[index + 1]
+                    neighbor = selected_track(neighbor_item)
                     if (
                         verification_offsets.offset_for_lba(neighbor.begin_lba)
                         == write_offset
                     ):
-                        following = resolve_audio(neighbor)[0]
+                        following = resolve_audio(neighbor_item)[0]
                 elif write_offset < 0:
                     last = component[-1]
                     tail_start = last.start_sector + last.sectors
